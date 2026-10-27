@@ -2,7 +2,7 @@
 # One-line Bitwarden password check-up for a Mac. Read-only on the vault.
 #   curl -fsSL <BASE_URL>/bw-health.sh | bash                          # full run: report, then export staging
 #   curl -fsSL <BASE_URL>/bw-health.sh | bash -s -- check              # install only
-#   curl -fsSL <BASE_URL>/bw-health.sh | bash -s -- dedupe exact|merge # duplicate cleanup preview (read-only)
+#   curl -fsSL <BASE_URL>/bw-health.sh | bash -s -- dedupe exact|merge|pick # duplicate cleanup preview (read-only)
 #   curl -fsSL <BASE_URL>/bw-health.sh | bash -s -- dedupe merge apply [N]   # act on it, after a typed confirmation
 #   bash bw-health.sh exports                                          # stage Downloads exports only
 # Only the dedupe step ever changes the vault; see README.md.
@@ -166,7 +166,7 @@ case "${1:-}" in
     printf '%s\n' ${STAGED[@]+"${STAGED[@]}"}
     exit 0 ;;
   dedupe)
-    case "${2:-}" in exact|merge) ;; *) fail "use: dedupe exact, or dedupe merge. Add apply to act, then a number to limit how many groups." ;; esac
+    case "${2:-}" in exact|merge|pick) ;; *) fail "use: dedupe exact, dedupe merge or dedupe pick. Add apply to act, then a number to limit how many groups." ;; esac
     case "${3:-}" in ""|apply) ;; *) fail "after the stage, the only word allowed is apply" ;; esac
     [ -z "${4:-}" ] || { [ "${3:-}" = apply ] && [[ "$4" =~ ^[1-9][0-9]*$ ]]; } || fail "a limit goes after apply and is a whole number, 1 or more"
     [ -z "${5:-}" ] || fail "nothing is allowed after the limit" ;;
@@ -191,7 +191,7 @@ trap '"$BW" lock >/dev/null 2>&1 || true' EXIT
 say "Checking every password (this can take a minute)"
 export PATH="$BIN_DIR:$PATH"
 
-# --- duplicate cleanup (its own run: `bash -s -- dedupe exact|merge [apply [N]]`) -----------------
+# --- duplicate cleanup (its own run: `bash -s -- dedupe exact|merge|pick [apply [N]]`) ------------
 if [ "${1:-}" = "dedupe" ]; then
   say "Duplicate cleanup: $2${3:+ ($3)}"
   dedupe_args=("$2" --out-dir "$DEDUPE_DIR")

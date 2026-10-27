@@ -67,7 +67,9 @@ curl -fsSL https://raw.githubusercontent.com/nellirob92/bw-health/main/bw-health
 | --- | --- |
 | `dedupe exact` | Preview: copies that are identical in every field. |
 | `dedupe merge` | Preview: copies with the same password (or a missing one) whose details differ. |
+| `dedupe pick` | Preview: copies whose only conflict is different passwords, each listed newest password first with its dates. |
 | `dedupe exact apply` or `dedupe merge apply` | Acts on the preview, after you read the list and type `DEDUPE`. |
+| `dedupe pick apply` | Asks, group by group, which password works (type its number; Enter skips the group), then acts after `DEDUPE`. |
 | `... apply 10` | Acts on only the first 10 groups. Start with `apply 1`. |
 
 **What it does to a group of copies.** One copy is kept. It gains the other copies' URLs (the same site
@@ -81,8 +83,13 @@ every edit the kept copy is read back from Bitwarden, and the run stops before t
 was saved differs from what was sent. The read-back can detect a damaged passkey but cannot undo it, so keep
 the original in Apple Passwords or Chrome until you have checked that entry in Bitwarden.
 
-**Left alone, and listed with the reason:** copies with different passwords or different one-time-code
-seeds, a custom field with two values, an attachment, several passkeys (or one Bitwarden listed without its
+**Different passwords (`dedupe pick`).** Copies are ranked by when Bitwarden last saw the password change,
+then the last edit, then creation, shown in your local time. The kept entry takes the password you pick and
+gains the other copies' details as above. The other copies, with their passwords, go to the Trash, so sign in
+with the picked password before their 30 days are up.
+
+**Left alone, and listed with the reason:** copies with different one-time-code seeds, a custom field with
+two values, an attachment, several passkeys (or one Bitwarden listed without its
 key), password history the kept copy lacks (Bitwarden's command line cannot save a joined history), the same
 URL with two different match settings, and anything shared with an organization.
 

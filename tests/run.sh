@@ -354,6 +354,59 @@ if ( STATE="$WORK/state-noorg.json"; dedupe "$WORK/tty-no" exact >"$WORK/dd11.lo
 expect "$WORK/dd11.log" 'belong to an organization' "a vault that never reports organizations is refused"
 pass "no organization information means no dedupe"
 
+# --- dedupe pick: groups whose only conflict is different passwords ----------------------------------
+# Bank one (b1): b1a's password changed most recently, though b1b was edited later and is the kept copy.
+# k1: the passkey copy holds the older password. s1: skipped with Enter. x1 also has two seeds, b4
+# differs only by seeds: both stay left alone. Zoom (m2) is for the merge stage. Cannot catch the real
+# bw reporting passwordRevisionDate differently from this model.
+expect "$WORK/dd2.log" 'different passwords: dedupe pick' "exact and merge point to the pick stage for different-password groups"
+/usr/bin/jq '[.[] | select(.id | test("^(b1|b4|m2)"))] | map(if .id == "b1a" then .login.passwordRevisionDate = "2026-03-05T12:00:00Z" else . end) + [
+  {"id":"k1a","type":1,"organizationId":null,"name":"Kay","notes":null,"folderId":null,"favorite":false,"reprompt":0,"creationDate":"2025-01-01T00:00:00Z","revisionDate":"2025-06-01T00:00:00Z","deletedDate":null,"fields":[],"login":{"username":"k@x.com","password":"PW-secret-k1-old","passwordRevisionDate":null,"totp":null,"fido2Credentials":[{"credentialId":"cred-k1","keyValue":"KEYDATA-k1","rpId":"k1.example.com"}],"uris":[{"match":null,"uri":"https://k1.example.com"}]}},
+  {"id":"k1b","type":1,"organizationId":null,"name":"Kay","notes":null,"folderId":null,"favorite":false,"reprompt":0,"creationDate":"2025-02-01T00:00:00Z","revisionDate":"2026-04-02T00:00:00Z","deletedDate":null,"fields":[],"login":{"username":"k@x.com","password":"PW-secret-k1-new","passwordRevisionDate":"2026-04-01T09:30:00Z","totp":null,"uris":[{"match":null,"uri":"https://k1.example.com"}]}},
+  {"id":"s1a","type":1,"organizationId":null,"name":"Odd folder","notes":null,"folderId":"fA","favorite":false,"reprompt":0,"revisionDate":"2026-01-01T00:00:00Z","deletedDate":null,"fields":[],"login":{"username":"s@x.com","password":"PW-secret-s1-a","totp":null,"uris":[{"match":null,"uri":"https://s1.example.com"}]}},
+  {"id":"s1b","type":1,"organizationId":null,"name":"Odd folder","notes":null,"folderId":null,"favorite":false,"reprompt":0,"revisionDate":"2026-02-01T00:00:00Z","deletedDate":null,"fields":[],"login":{"username":"s@x.com","password":"PW-secret-s1-b","totp":null,"uris":[{"match":null,"uri":"https://s1.example.com"}]}},
+  {"id":"s1c","type":1,"organizationId":null,"name":"Odd folder","notes":null,"folderId":null,"favorite":false,"reprompt":0,"revisionDate":"2025-12-01T00:00:00Z","deletedDate":null,"fields":[],"login":{"username":"s@x.com","password":"","totp":null,"uris":[{"match":null,"uri":"https://s1.example.com"}]}},
+  {"id":"x1a","type":1,"organizationId":null,"name":"Both","notes":null,"folderId":null,"favorite":false,"reprompt":0,"revisionDate":"2026-01-01T00:00:00Z","deletedDate":null,"fields":[],"login":{"username":"x@x.com","password":"PW-secret-x1-a","totp":"otpauth://totp/x?secret=AAAA","uris":[{"match":null,"uri":"https://x1.example.com"}]}},
+  {"id":"x1b","type":1,"organizationId":null,"name":"Both","notes":null,"folderId":null,"favorite":false,"reprompt":0,"revisionDate":"2026-02-01T00:00:00Z","deletedDate":null,"fields":[],"login":{"username":"x@x.com","password":"PW-secret-x1-b","totp":"otpauth://totp/x?secret=BBBB","uris":[{"match":null,"uri":"https://x1.example.com"}]}}]' "$FX/dupes.json" >"$WORK/state-pick.json"
+cp "$WORK/state-pick.json" "$WORK/state-pick-before.json"
+pick() { # pick <tty file> <log> <args...>
+  local tty="$1" log="$2"; shift 2
+  ( STATE="$WORK/state-pick.json"; BWLOG="$WORK/bw-pick.log"; export TZ=UTC; dedupe "$tty" pick "$@" >"$log" 2>&1 )
+}
+: >"$WORK/bw-pick.log"
+pick "$WORK/tty-no" "$WORK/pk1.log" || { cat "$WORK/pk1.log"; echo "FAIL pick dry run"; exit 1; }
+expect "$WORK/pk1.log" '^3 group\(s\) to change, 2 left alone, 1 for the other stage' "pick counts only groups whose sole conflict is the password"
+expect "$WORK/pk1.log" 'Left alone: 2 different one-time-code seeds' "a group with different passwords and another conflict stays left alone, with that reason"
+expect "$WORK/pk1.log" '^ +1 +"Bank one" +folder: no folder +password changed 2026-03-05 12:00, edited 2026-01-01 00:00$' "the newest password is listed first, with its dates in local time"
+expect "$WORK/pk1.log" '^ +2 +"Bank one" +folder: no folder +edited 2026-02-01 00:00 +\(kept entry\)$' "a copy edited later but with an older password ranks second"
+expect "$WORK/pk1.log" '^ +1 +"Kay" .*password changed 2026-04-01 09:30, edited 2026-04-02 00:00, created 2025-02-01 00:00$' "every date bw reports is shown"
+expect "$WORK/pk1.log" '^ +2 +"Kay" .*\(kept entry, holds a passkey\)$' "the passkey copy is the kept entry even with the older password"
+expect "$WORK/pk1.log" 'Nothing was changed' "a pick dry run changes nothing"
+cmp -s "$WORK/state-pick.json" "$WORK/state-pick-before.json" && ! grep -qE '^(edit|delete) ' "$WORK/bw-pick.log" || { echo "FAIL a pick dry run changed the vault"; exit 1; }
+
+printf '9\n\n3\n' >"$WORK/tty-skip"
+pick "$WORK/tty-skip" "$WORK/pk2.log" --apply || { cat "$WORK/pk2.log"; echo "FAIL skipping every group must end cleanly"; exit 1; }
+expect "$WORK/pk2.log" 'not one of the numbers shown, so this group is skipped' "an answer that is not a listed number skips the group"
+expect "$WORK/pk2.log" 'That copy has no password, so this group is skipped' "choosing a copy with no password skips the group instead of blanking the password"
+expect "$WORK/pk2.log" 'No group was chosen. Nothing was changed.' "skipping every group changes nothing"
+! grep -q 'Type DEDUPE' "$WORK/pk2.log" || { echo "FAIL the confirmation was asked with nothing chosen"; exit 1; }
+printf '1\n1\n\nno\n' >"$WORK/tty-pick-no"
+if pick "$WORK/tty-pick-no" "$WORK/pk3.log" --apply; then echo "FAIL pick went ahead without the confirmation word"; exit 1; fi
+expect "$WORK/pk3.log" 'This will edit 2 kept copies and move 2 copies to the Bitwarden trash' "pick states the edits and the trashing before the confirmation"
+cmp -s "$WORK/state-pick.json" "$WORK/state-pick-before.json" && ! grep -qE '^(edit|delete) ' "$WORK/bw-pick.log" || { echo "FAIL an unconfirmed pick changed the vault"; exit 1; }
+pass "pick ranks by password date, previews, and changes nothing until a group is chosen and DEDUPE typed"
+
+printf '1\n1\n\nDEDUPE\n' >"$WORK/tty-pick"
+pick "$WORK/tty-pick" "$WORK/pk4.log" --apply || { cat "$WORK/pk4.log"; echo "FAIL pick apply"; exit 1; }
+pv() { /usr/bin/jq -r --arg id "$1" ".[] | select(.id == \$id) | $2" "$WORK/state-pick.json"; }
+[ "$(pv b1b .login.password)" = "PW-secret-b1-old" ] && [ "$(pv b1a .deletedDate)" != "null" ] && [ "$(pv b1b .deletedDate)" = "null" ] || { echo "FAIL the chosen password was not saved on the kept copy, or the other copy not trashed"; exit 1; }
+[ "$(pv k1a .login.password)" = "PW-secret-k1-new" ] && [ "$(pv k1a '.login.fido2Credentials[0].keyValue')" = "KEYDATA-k1" ] && [ "$(pv k1b .deletedDate)" != "null" ] || { echo "FAIL the passkey copy must keep its passkey and take the chosen password"; exit 1; }
+[ "$(pv s1a .deletedDate)" = "null" ] && [ "$(pv s1b .deletedDate)" = "null" ] && [ "$(pv s1a .login.password)" = "PW-secret-s1-a" ] || { echo "FAIL a skipped group was changed"; exit 1; }
+[ "$(/usr/bin/jq '[.[] | select(.id | test("^(x1|b4|m2)")) | select(.deletedDate == null)] | length' "$WORK/state-pick.json")" = "6" ] && ! grep -qE '^(edit|delete) item (x1|b4|m2|s1)' "$WORK/bw-pick.log" || { echo "FAIL pick touched a group it does not act on"; exit 1; }
+[ "$(grep -c '^get item' "$WORK/bw-pick.log")" = "2" ] || { echo "FAIL every pick edit must be read back"; exit 1; }
+! grep -q 'PW-secret\|KEYDATA' "$WORK/pk1.log" "$WORK/pk2.log" "$WORK/pk3.log" "$WORK/pk4.log" "$PLANS/plan-pick.md" || { echo "FAIL a password or passkey key reached the terminal or the plan"; exit 1; }
+pass "pick saves the chosen password on the kept copy, keeps a passkey, trashes the rest, and leaves skipped groups alone"
+
 # The entry point refuses a bad dedupe request before it asks for a master password. Cannot catch
 # a valid request misbehaving after sign-in; that needs a real vault.
 for bad in "bogus" "exact later" "exact 5" "exact apply 1 extra" "exact apply abc" "merge apply 0"; do
@@ -394,6 +447,10 @@ expect "$WORK/pw-locked.log" 'decryption operation failed' "the developer error 
 expect "$WORK/pw-locked.log" 'stop after two tries' "a failed unlock tells people when to stop"
 expect "$WORK/pw-unauthenticated.log" 'Sign-in did not complete' "a failed first sign-in says so in plain words"
 pass "a failed sign-in or unlock is explained in plain words"
+if HOME="$PW_HOME" BW_HEALTH_BASE_URL="file://$ROOT" BW_HEALTH_TTY="$WORK/tty-pw" FAKE_BW_STATUS=locked /bin/bash bw-health.sh dedupe pick apply 2 >"$WORK/pw-pick.log" 2>&1; then
+  echo "FAIL the locked stand-in vault unlocked"; exit 1
+fi
+expect "$WORK/pw-pick.log" 'did not unlock your Bitwarden vault' "the entry point accepts 'dedupe pick apply 2' and goes on to sign-in"
 
 # No person is named in the tool, its messages, its tests or its docs: whoever shares the paste line is
 # "the person who sent you this line". Cannot catch a name other than the one it looks for.

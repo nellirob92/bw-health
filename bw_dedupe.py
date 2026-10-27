@@ -5,20 +5,23 @@
 """Trash or merge duplicate logins in a Bitwarden vault, one stage at a time.
 
 A duplicate group is the same site and username (case-insensitive), the grouping the health
-report uses. Two stages, each run on its own:
+report uses. Three stages, each run on its own:
 
   exact  groups whose copies are identical in every field: keep one, trash the rest.
   merge  groups with the same password (or a missing one) but other details that differ: add the
          extra URLs, notes, custom fields and one-time-code seed to the kept
          copy, fill a missing password from another copy, then trash the rest.
+  pick   groups whose only conflict is different passwords: the person picks, group by group, the
+         password that works (copies listed newest password first, Enter skips), then it is merged
+         like the merge stage and the other copies, with their passwords, go to the trash.
 
 A copy that holds a passkey is always the kept copy, since a passkey cannot be moved. After every
 edit the kept copy is read back, and the run stops before trashing anything if bw saved something
 other than what was sent. A group is left alone, and listed with the reason, when copies have
-different passwords or one-time-code seeds, a custom field with two values, an attachment, several
-passkeys or one listed without its key, password history the kept copy lacks (bw edit cannot save
-a joined history), or belong to an organization. Without --apply this only writes a plan. Trashed
-copies stay in the web vault's Trash for 30 days; this script never deletes permanently.
+different one-time-code seeds, a custom field with two values, an attachment, several passkeys or
+one listed without its key, password history the kept copy lacks (bw edit cannot save a joined
+history), or belong to an organization. Without --apply this only writes a plan. Trashed copies
+stay in the web vault's Trash for 30 days; this script never deletes permanently.
 """
 
 from __future__ import annotations
@@ -33,12 +36,15 @@ import subprocess
 import sys
 from collections import Counter
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from functools import cache
 from pathlib import Path
 from urllib.parse import urlparse
 
 LOGIN_TYPE = 1
 CONFIRM_WORD = "DEDUPE"
 NOTE_SEPARATOR = "\n\n--- merged from a duplicate entry ---\n\n"
+DIFFERENT_PASSWORDS = "different passwords"
 
 
 def run_bw(*args: str, stdin: str | None = None) -> str:
@@ -159,8 +165,6 @@ def blocker(items: list[dict]) -> str | None:
         return "several copies hold a passkey"
     if any(not c.get("keyValue") or not c.get("credentialId") or not c.get("rpId") for i in items for c in passkeys(i)):
         return "a passkey that bw listed without its key"  # an edit would save the gap, and a read-back of a gap proves nothing
-    if len({pw for i in items if (pw := login_of(i).get("password"))}) > 1:  # an empty password is a gap, not a conflict
-        return "different passwords"
     if len({login_of(i).get("totp") for i in items if login_of(i).get("totp")}) > 1:
         return "different one-time-code seeds"
     seen: dict[tuple, str] = {}
@@ -180,6 +184,8 @@ def blocker(items: list[dict]) -> str | None:
             matches.setdefault(uri_key(u, loose=True), set()).add(str(u.get("match")))
     if any(len(m) > 1 for m in matches.values()):
         return "the same URL with different match settings"
+    if len({pw for i in items if (pw := login_of(i).get("password"))}) > 1:  # an empty password is a gap, not a conflict
+        return DIFFERENT_PASSWORDS  # checked last, so this reason means the pick stage can handle the group
     return None
 
 
@@ -199,7 +205,7 @@ def merge_into(keeper: dict, others: list[dict]) -> dict:
     seen_uris = {uri_key(u) for u in uris}
     seen_fields = {field_key(f) for f in merged.get("fields") or []}
     notes = [n for n in [(keeper.get("notes") or "").strip()] if n]
-    if not login.get("password"):  # the blocker guarantees at most one distinct password among the copies
+    if not login.get("password"):  # one distinct password among the copies, or the pick stage sets the chosen one after
         filled = next((login_of(o)["password"] for o in others if login_of(o).get("password")), None)
         if filled:
             login["password"] = filled
@@ -260,11 +266,37 @@ def find_groups(items: list[dict]) -> list[Group]:
 
 
 def select(groups: list[Group], stage: str) -> tuple[list[Group], list[Group], int]:
-    """(groups this stage acts on, groups left alone, groups waiting for the other stage)."""
-    acting = [g for g in groups if not g.blocked and g.exact == (stage == "exact")]
-    blocked = [g for g in groups if g.blocked]
+    """(groups this stage acts on, groups left alone, groups waiting for another stage)."""
+    if stage == "pick":
+        acting = [g for g in groups if g.blocked == DIFFERENT_PASSWORDS]
+        blocked = [g for g in groups if g.blocked and g.blocked != DIFFERENT_PASSWORDS]
+    else:
+        acting = [g for g in groups if not g.blocked and g.exact == (stage == "exact")]
+        blocked = [g for g in groups if g.blocked]
     other_stage = len(groups) - len(acting) - len(blocked)
     return acting, blocked, other_stage
+
+
+def when(value: str | None) -> datetime | None:
+    return datetime.fromisoformat(value) if value else None
+
+
+def item_dates(item: dict) -> list[tuple[str, datetime | None]]:
+    return [("password changed", when(login_of(item).get("passwordRevisionDate"))),
+            ("edited", when(item.get("revisionDate"))), ("created", when(item.get("creationDate")))]
+
+
+def by_newest_password(g: Group) -> list[dict]:
+    """The group's copies, newest password first: when bw saw the password change, then the last edit, then creation."""
+    oldest = datetime.min.replace(tzinfo=timezone.utc)
+    return sorted([g.keeper, *g.others], key=lambda i: ([d or oldest for _, d in item_dates(i)], i["id"]), reverse=True)
+
+
+def set_password(g: Group, password: str) -> None:
+    """The keeper with the chosen password and everything the merge stage would add."""
+    merged = merge_into(g.keeper, g.others)
+    merged["login"]["password"] = password
+    g.merged = merged if merged != g.keeper else None
 
 
 STAGE_SUMMARY = {
@@ -274,6 +306,11 @@ STAGE_SUMMARY = {
               "but other details that differ. The kept copy gains the other copies' URLs, "
               "notes, custom fields, one-time-code seed, a missing password and any favorite or re-prompt setting, then the rest go to the "
               "Bitwarden trash. A copy with a passkey is always the one kept. Only the kept copy's name and folder survive."),
+    "pick": ("Pick stage: a login saved more than once (same site and username) whose copies have different passwords and "
+             "no other conflict. Each copy is listed newest password first, with its dates. Type the number of the password "
+             "that works, or press Enter to skip the group. The kept entry takes that password and gains the other copies' "
+             "details as in the merge stage. The other copies, with their passwords, go to the Bitwarden trash for 30 days. "
+             "A copy with a passkey is always the one kept."),
 }
 
 
@@ -348,6 +385,36 @@ def render_preview(groups: list[Group], total: int, folders: dict[str, str]) -> 
     return "\n".join(lines)
 
 
+def render_choices(g: Group, copies: list[dict], n: int, total: int, folders: dict[str, str]) -> str:
+    """A pick group's copies, numbered newest password first, with their dates in local time and the kept entry marked."""
+    lines = [f"[{n}/{total}] {g.label}, {len(copies)} copies with different passwords"]
+    for k, item in enumerate(copies, start=1):
+        dates = ", ".join(f"{label} {d.astimezone():%Y-%m-%d %H:%M}" for label, d in item_dates(item) if d)
+        mark = "" if item is not g.keeper else "  (kept entry, holds a passkey)" if passkeys(item) else "  (kept entry)"
+        lines.append(f'  {k}  "{clean(item.get("name") or "(no name)")}"  folder: {folder_name(item, folders)}  {dates}{mark}')
+    return "\n".join(lines)
+
+
+def choose_passwords(groups: list[Group], folders: dict[str, str]) -> list[Group]:
+    """Asks, group by group, which copy's password works. Enter, or anything but a listed number, skips the group."""
+    chosen = []
+    for n, g in enumerate(groups, start=1):
+        copies = by_newest_password(g)
+        print(render_choices(g, copies, n, len(groups), folders))
+        answer = ask("Type the number of the password that works (1 is the newest), or press Enter to skip: ")
+        if not answer:
+            print("Skipped.\n")
+        elif answer not in {str(k) for k in range(1, len(copies) + 1)}:
+            print("That is not one of the numbers shown, so this group is skipped.\n")  # never echoed: it could be a password
+        elif not login_of(copies[int(answer) - 1]).get("password"):
+            print("That copy has no password, so this group is skipped.\n")
+        else:
+            set_password(g, login_of(copies[int(answer) - 1])["password"])
+            chosen.append(g)
+            print()
+    return chosen
+
+
 def render_plan(stage: str, acting: list[Group], blocked: list[Group], other_stage: int, folders: dict[str, str]) -> str:
     trash = sum(len(g.others) for g in acting)
     lines = [f"# Duplicate cleanup plan: {stage}", "", STAGE_SUMMARY[stage], "",
@@ -360,7 +427,7 @@ def render_plan(stage: str, acting: list[Group], blocked: list[Group], other_sta
         lines += [f"| {g.label} | {len(g.others) + 1} "
                   f"| {clean(g.keeper.get('name') or '(no name)')} ({folder_name(g.keeper, folders)}) "
                   f"| {'; '.join(clean(o.get('name') or '(no name)') + ' (' + folder_name(o, folders) + ')' for o in g.others)} "
-                  f"| {describe_change(g)} |"
+                  f"| {'the password you choose; ' if stage == 'pick' else ''}{describe_change(g)} |"
                   for g in acting]
     else:
         lines.append("Nothing.")
@@ -374,11 +441,15 @@ def render_plan(stage: str, acting: list[Group], blocked: list[Group], other_sta
     return "\n".join(lines)
 
 
-def read_confirmation(prompt: str) -> str:
-    tty = os.environ.get("BW_HEALTH_TTY", "/dev/tty")
+@cache
+def terminal():
+    """Opened once, so successive answers are successive lines (stdin is not the keyboard under curl | bash)."""
+    return open(os.environ.get("BW_HEALTH_TTY", "/dev/tty"), encoding="utf-8")
+
+
+def ask(prompt: str) -> str:
     print(prompt, end="", flush=True)
-    with open(tty, encoding="utf-8") as fh:
-        return fh.readline().strip()
+    return terminal().readline().strip()
 
 
 def verify_edit(g: Group) -> None:
@@ -429,7 +500,8 @@ def apply(groups: list[Group]) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("stage", choices=["exact", "merge"], help="exact: identical copies only; merge: same password, details differ")
+    ap.add_argument("stage", choices=["exact", "merge", "pick"],
+                    help="exact: identical copies only; merge: same password, details differ; pick: choose between different passwords")
     ap.add_argument("--out-dir", required=True, help="folder for the plan file")
     ap.add_argument("--apply", action="store_true", help="act on the plan after you type the confirmation word")
     ap.add_argument("--limit", type=int, help="act on only the first N groups (a first run should use 1)")
@@ -453,24 +525,35 @@ def main() -> None:
     if blocked:
         reasons = Counter(g.blocked for g in blocked)
         print("Left alone: " + ", ".join(f"{n} {why}" for why, n in reasons.most_common()) + ".")
+        if DIFFERENT_PASSWORDS in reasons:
+            print(f"Groups with {DIFFERENT_PASSWORDS}: dedupe pick shows each copy's dates and lets you choose the password to keep.")
 
     if not args.apply:
         sample = acting[:3]
         if sample:
             head = "all" if len(sample) == len(acting) else f"the first {len(sample)} of {len(acting)}"
             print(f"\nPreview: {head} groups (every group is in the plan file)\n")
-            print(render_preview(sample, len(acting), folders))
+            if args.stage == "pick":
+                print("\n\n".join(render_choices(g, by_newest_password(g), n, len(acting), folders)
+                                  for n, g in enumerate(sample, start=1)) + "\n")
+            else:
+                print(render_preview(sample, len(acting), folders))
         print("Nothing was changed. Add apply to act on this plan.")
         return
     todo = acting[: args.limit] if args.limit else acting
     if not todo:
         print("Nothing to do.")
         return
+    if args.stage == "pick":
+        todo = choose_passwords(todo, folders)
+        if not todo:
+            print("No group was chosen. Nothing was changed.")
+            return
     edits = sum(1 for g in todo if g.merged is not None)
     trash = sum(len(g.others) for g in todo)
     print(f"\nActing on {len(todo)} of {len(acting)} groups:\n")
     print(render_preview(todo, len(todo), folders))
-    answer = read_confirmation(
+    answer = ask(
         f"This will edit {edits} kept {'copy' if edits == 1 else 'copies'} and move {trash} {'copy' if trash == 1 else 'copies'} "
         f"to the Bitwarden trash, where they stay for 30 days. Type {CONFIRM_WORD} to continue: ")
     if answer != CONFIRM_WORD:
