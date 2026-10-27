@@ -287,9 +287,14 @@ def item_dates(item: dict) -> list[tuple[str, datetime | None]]:
 
 
 def by_newest_password(g: Group) -> list[dict]:
-    """The group's copies, newest password first: when bw saw the password change, then the last edit, then creation."""
+    """The group's copies, newest password first. A password is as old as its last change, or as its copy when
+    bw has never seen it change (an import or an untouched entry); the last edit breaks ties."""
     oldest = datetime.min.replace(tzinfo=timezone.utc)
-    return sorted([g.keeper, *g.others], key=lambda i: ([d or oldest for _, d in item_dates(i)], i["id"]), reverse=True)
+
+    def key(item: dict) -> tuple:
+        changed, edited, created = (d for _, d in item_dates(item))
+        return (changed or created or oldest, edited or oldest, item["id"])
+    return sorted([g.keeper, *g.others], key=key, reverse=True)
 
 
 def set_password(g: Group, password: str) -> None:
@@ -358,6 +363,15 @@ def describe_change(g: Group) -> str:
     return ", ".join(gains(g) + differences(g)) or "nothing to add"
 
 
+def planned_change(g: Group, stage: str) -> str:
+    """describe_change for the plan file. A pick group's password is chosen only at apply, so the plan shows the rest."""
+    if stage != "pick":
+        return describe_change(g)
+    merged = merge_into(g.keeper, g.others)
+    merged["login"]["password"] = login_of(g.keeper).get("password")
+    return "the password you choose; " + describe_change(Group(g.account, g.keeper, g.others, merged=merged))
+
+
 def folder_name(item: dict, folders: dict[str, str]) -> str:
     fid = item.get("folderId")
     return clean(folders.get(fid) or "unknown folder") if fid else "no folder"
@@ -401,7 +415,8 @@ def choose_passwords(groups: list[Group], folders: dict[str, str]) -> list[Group
     for n, g in enumerate(groups, start=1):
         copies = by_newest_password(g)
         print(render_choices(g, copies, n, len(groups), folders))
-        answer = ask("Type the number of the password that works (1 is the newest), or press Enter to skip: ")
+        answer = ask("Type the number of the copy whose password works (1 is the newest; the number, not the password), "
+                     "or press Enter to skip: ")
         if not answer:
             print("Skipped.\n")
         elif answer not in {str(k) for k in range(1, len(copies) + 1)}:
@@ -420,14 +435,14 @@ def render_plan(stage: str, acting: list[Group], blocked: list[Group], other_sta
     lines = [f"# Duplicate cleanup plan: {stage}", "", STAGE_SUMMARY[stage], "",
              f"- Groups this stage will change: **{len(acting)}** ({trash} copies to the trash)",
              f"- Groups left alone: **{len(blocked)}**",
-             f"- Groups for the other stage: **{other_stage}**", ""]
+             f"- Groups for another stage: **{other_stage}**", ""]
     lines += ["## Will change", ""]
     if acting:
         lines += ["| Account | Copies | Kept | Trashed | What the kept copy gains |", "| --- | --- | --- | --- | --- |"]
         lines += [f"| {g.label} | {len(g.others) + 1} "
                   f"| {clean(g.keeper.get('name') or '(no name)')} ({folder_name(g.keeper, folders)}) "
                   f"| {'; '.join(clean(o.get('name') or '(no name)') + ' (' + folder_name(o, folders) + ')' for o in g.others)} "
-                  f"| {'the password you choose; ' if stage == 'pick' else ''}{describe_change(g)} |"
+                  f"| {planned_change(g, stage)} |"
                   for g in acting]
     else:
         lines.append("Nothing.")
@@ -520,7 +535,7 @@ def main() -> None:
     plan = out_dir / f"plan-{args.stage}.md"
     plan.write_text(render_plan(args.stage, acting, blocked, other_stage, folders), encoding="utf-8")
     plan.chmod(0o600)
-    print(f"{len(acting)} group(s) to change, {len(blocked)} left alone, {other_stage} for the other stage. Plan: {plan}")
+    print(f"{len(acting)} group(s) to change, {len(blocked)} left alone, {other_stage} for another stage. Plan: {plan}")
     print(f"\n{STAGE_SUMMARY[args.stage]}")
     if blocked:
         reasons = Counter(g.blocked for g in blocked)

@@ -83,8 +83,9 @@ every edit the kept copy is read back from Bitwarden, and the run stops before t
 was saved differs from what was sent. The read-back can detect a damaged passkey but cannot undo it, so keep
 the original in Apple Passwords or Chrome until you have checked that entry in Bitwarden.
 
-**Different passwords (`dedupe pick`).** Copies are ranked by when Bitwarden last saw the password change,
-then the last edit, then creation, shown in your local time. The kept entry takes the password you pick and
+**Different passwords (`dedupe pick`).** Copies are ranked by when their password was set: its last change,
+or the copy's creation if Bitwarden never saw it change (an import), with the last edit breaking ties. Dates
+are shown in your local time. The kept entry takes the password you pick and
 gains the other copies' details as above. The other copies, with their passwords, go to the Trash, so sign in
 with the picked password before their 30 days are up.
 
