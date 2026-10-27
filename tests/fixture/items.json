@@ -1,0 +1,10 @@
+[
+ {"id":"1","type":1,"name":"Gmail","deletedDate":null,"login":{"username":"mom@gmail.com","password":"password123","uris":[{"uri":"https://accounts.google.com"}]}},
+ {"id":"2","type":1,"name":"Netflix","deletedDate":null,"login":{"username":"mom@gmail.com","password":"password123","uris":[{"uri":"https://www.netflix.com"}]}},
+ {"id":"3","type":1,"name":"Roblox","deletedDate":null,"login":{"username":"kiddo","password":"password123","uris":[{"uri":"roblox.com"}]}},
+ {"id":"4","type":1,"name":"Chase","deletedDate":null,"login":{"username":"mom","password":"Xk9#mPq2$vL7nR4wZ!t8","uris":[{"uri":"https://chase.com"}]}},
+ {"id":"5","type":1,"name":"netflix.com","deletedDate":null,"login":{"username":"Mom@gmail.com","password":"Summer2024","uris":[{"uri":"https://netflix.com/login"}]}},
+ {"id":"6","type":1,"name":"Old site","deletedDate":"2026-01-01T00:00:00Z","login":{"username":"x","password":"password123","uris":[]}},
+ {"id":"7","type":2,"name":"A note","deletedDate":null},
+ {"id":"8","type":1,"name":"Wifi","deletedDate":null,"login":{"username":"","password":"","uris":[]}}
+]

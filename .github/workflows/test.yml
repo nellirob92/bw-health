@@ -1,0 +1,13 @@
+name: test
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: bash -n bw-health.sh tests/run.sh
+      - run: bash tests/run.sh
