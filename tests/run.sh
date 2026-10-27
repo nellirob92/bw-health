@@ -261,7 +261,7 @@ expect "$WORK/dd-preview.log" 'Nothing in your vault changes until you have read
 expect "$WORK/dd-preview.log" '^\[1/4\] alpha.example.com \(case@x.com\)' "apply numbers each group with its account"
 expect "$WORK/dd-preview.log" 'KEEP +"Etsy shop" +folder: no folder +2 URLs' "apply shows the copy it keeps, with folder and URL count"
 expect "$WORK/dd-preview.log" 'TRASH +"Etsy" +folder: no folder +2 URLs' "apply shows the copy it trashes"
-expect "$WORK/dd-preview.log" 'ADDS +\+1 URL \(https://m.etsy.com/\), notes joined' "apply shows exactly what the kept copy gains"
+expect "$WORK/dd-preview.log" 'ADDS +\+1 URL \(https://m.etsy.com/\), notes joined, marked favorite, master password re-prompt turned on$' "apply shows exactly what the kept copy gains, flags included"
 ! grep -q 'TOKEN123' "$WORK/dd-preview.log" "$WORK/dd2.log" "$PLANS/plan-merge.md" || { echo "FAIL a URL query string reached the terminal or the plan"; exit 1; }
 pass "a URL's query string (it can carry a token) is not shown"
 expect "$WORK/dd-preview.log" 'KEEP +"Folders" +folder: Chrome' "apply shows the kept folder by name"

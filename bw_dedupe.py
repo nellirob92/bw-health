@@ -272,7 +272,7 @@ STAGE_SUMMARY = {
               "One copy is kept and the rest go to the Bitwarden trash."),
     "merge": ("Merge stage: a login saved more than once (same site and username) with the same password, or a missing one, "
               "but other details that differ. The kept copy gains the other copies' URLs, "
-              "notes, custom fields, one-time-code seed and a missing password, then the rest go to the "
+              "notes, custom fields, one-time-code seed, a missing password and any favorite or re-prompt setting, then the rest go to the "
               "Bitwarden trash. A copy with a passkey is always the one kept. Only the kept copy's name and folder survive."),
 }
 
@@ -300,6 +300,10 @@ def gains(g: Group) -> list[str]:
         out.append("one-time-code seed taken")
     if login_of(kept).get("password") != login_of(g.keeper).get("password"):
         out.append("password taken from another copy")
+    if bool(kept.get("favorite")) != bool(g.keeper.get("favorite")):
+        out.append("marked favorite")
+    if (kept.get("reprompt") or 0) != (g.keeper.get("reprompt") or 0):
+        out.append("master password re-prompt turned on")
     return out
 
 

@@ -71,7 +71,8 @@ curl -fsSL https://raw.githubusercontent.com/nellirob92/bw-health/main/bw-health
 | `... apply 10` | Acts on only the first 10 groups. Start with `apply 1`. |
 
 **What it does to a group of copies.** One copy is kept. It gains the other copies' URLs (the same site
-written differently counts once), notes, custom fields, one-time-code seed and a missing password. The other
+written differently counts once), notes, custom fields, one-time-code seed, a missing password, and a
+favorite or master password re-prompt setting that any copy has turned on. The other
 copies go to Bitwarden's Trash, where they stay for 30 days and can be restored. Nothing is ever deleted
 permanently. Only the kept copy's name and folder survive.
 
