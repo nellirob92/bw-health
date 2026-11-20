@@ -475,6 +475,228 @@ if HOME="$PW_HOME" BW_HEALTH_BASE_URL="file://$ROOT" BW_HEALTH_TTY="$WORK/tty-pw
 fi
 expect "$WORK/pw-pick.log" 'did not unlock your Bitwarden vault' "the entry point accepts 'dedupe pick apply 2' and goes on to sign-in"
 
+# --- a bad request is refused before anything is installed, fetched or asked ------------------------
+EMPTY_HOME="$WORK/empty-home"; mkdir "$EMPTY_HOME"
+refuse() { # refuse <regex> <args...>
+  local want="$1"; shift
+  if HOME="$EMPTY_HOME" BW_HEALTH_BASE_URL="file://$ROOT" /bin/bash bw-health.sh "$@" >"$WORK/refuse.log" 2>&1; then
+    cat "$WORK/refuse.log"; echo "FAIL '$*' was accepted"; exit 1
+  fi
+  grep -qE -e "$want" "$WORK/refuse.log" || { cat "$WORK/refuse.log"; echo "FAIL '$*' was refused without saying: $want"; exit 1; }
+  [ -z "$(ls -A "$EMPTY_HOME")" ] || { echo "FAIL '$*' was refused only after something was written to the home folder"; exit 1; }
+}
+for bad in Mom 'mom dad' ../mom -mom '' mom_1 --logout-after; do refuse 'a --user name is 1 to 32 lowercase' --user "$bad"; done
+refuse 'a --user name is 1 to 32 lowercase' --user abcdefghijklmnopqrstuvwxyz0123456
+refuse '--user needs a name after it' check --user
+refuse '--user was given twice' --user mom --user dad
+refuse 'unknown option: --usr' --usr mom
+refuse 'unknown step: logut' --user mom logut
+refuse 'nothing is allowed after logout' --user mom logout now
+refuse '--logout-after goes with a run that signs in, not with check' check --logout-after
+refuse '--logout-after goes with a run that signs in, not with logout' --user mom logout --logout-after
+pass "a bad profile name, option or step is refused before anything is installed"
+
+# --- where the report scripts come from --------------------------------------------------------------
+# A copy of the checkout with a marked script: run as a file with no BW_HEALTH_BASE_URL, it must use
+# the scripts beside it. Cannot catch the published copies being fetched as well and then overwritten.
+APP="$FAKE_HOME/Library/Application Support/bw-health"
+mkdir "$WORK/clone"; cp bw-health.sh bw_*.py "$WORK/clone/"; echo '# marked local copy' >>"$WORK/clone/bw_report.py"
+env -u BW_HEALTH_BASE_URL HOME="$FAKE_HOME" /bin/bash "$WORK/clone/bw-health.sh" check >"$WORK/local.log" 2>&1 || { cat "$WORK/local.log"; echo "FAIL check from a checkout"; exit 1; }
+expect "$WORK/local.log" 'Using the report scripts beside this file' "a run from a checkout says it uses its own scripts"
+cmp -s "$WORK/clone/bw_report.py" "$APP/bw_report.py" || { echo "FAIL a run from a checkout did not use the script beside it"; exit 1; }
+HOME="$FAKE_HOME" BW_HEALTH_BASE_URL="file://$ROOT" /bin/bash "$WORK/clone/bw-health.sh" check >"$WORK/local2.log" 2>&1 || { cat "$WORK/local2.log"; echo "FAIL check with a base URL"; exit 1; }
+expect "$WORK/local2.log" 'Fetching the report scripts' "BW_HEALTH_BASE_URL still wins over the scripts beside the file"
+cmp -s bw_report.py "$APP/bw_report.py" || { echo "FAIL BW_HEALTH_BASE_URL was not the source"; exit 1; }
+rm "$WORK/clone/bw_dedupe.py"
+if env -u BW_HEALTH_BASE_URL HOME="$FAKE_HOME" /bin/bash "$WORK/clone/bw-health.sh" check >"$WORK/local3.log" 2>&1; then echo "FAIL a checkout missing a script was accepted"; exit 1; fi
+expect "$WORK/local3.log" 'only some of the report scripts are beside bw-health.sh' "a checkout missing one script is refused, not topped up from the published ones"
+HOME="$FAKE_HOME" BW_HEALTH_BASE_URL="file://$ROOT" /bin/bash -s -- --user mom check <bw-health.sh >"$WORK/piped.log" 2>&1 || { cat "$WORK/piped.log"; echo "FAIL piped check with --user"; exit 1; }
+expect "$WORK/piped.log" 'Installed OK' "--user works on the paste line (bash -s -- --user NAME)"
+[ -d "$APP/profiles/mom/data" ] || { echo "FAIL a piped --user run did not use the profile's folder"; exit 1; }
+pass "a checkout runs its own scripts; the paste line and BW_HEALTH_BASE_URL fetch them"
+
+# --- several people on one Mac account: --user NAME ---------------------------------------------------
+# A stand-in bw that keeps its sign-in in the data folder it is pointed at, as the real one does, and
+# serves a different vault per account. `open` is a stand-in too, so no browser or Finder window opens.
+# Cannot catch the real bw signing in, locking or signing out differently from this model.
+MU_HOME="$WORK/mu-home"; MU_APP="$MU_HOME/Library/Application Support/bw-health"; MU_DL="$MU_HOME/Downloads"
+MOM="$MU_APP/profiles/mom"; DAD="$MU_APP/profiles/dad"; MU_BWLOG="$WORK/mu-bw.log"; MU_OPENLOG="$WORK/mu-open.log"
+mkdir -p "$MU_HOME/.local/bin" "$MU_HOME/Desktop" "$MU_DL" "$MU_APP/bin" "$WORK/mu-bin" "$WORK/vaults"
+ln -s "$FAKE_HOME/.local/bin/uv" "$MU_HOME/.local/bin/uv"
+cat >"$MU_APP/bin/bw" <<'EOF'
+#!/bin/bash
+D="$BITWARDENCLI_APPDATA_DIR"
+echo "${D#*/bw-health/} $*" >>"$FAKE_BW_LOG"
+case "$1" in
+  status)
+    if [ -f "$D/account" ]; then
+      state=locked; [ -z "${BW_SESSION:-}" ] || state=unlocked
+      echo "{\"status\":\"$state\",\"userEmail\":\"$(cat "$D/account")\"}"
+    else
+      echo '{"status":"unauthenticated","userEmail":null}'
+    fi ;;
+  login)
+    [ ! -f "$D/account" ] || { echo "You are already logged in." >&2; exit 1; }
+    echo "$FAKE_BW_EMAIL" >"$D/account"; echo "session-key" ;;
+  unlock) [ -f "$D/account" ] || { echo "You are not logged in." >&2; exit 1; }; echo "session-key" ;;
+  lock) ;;
+  logout)
+    [ -f "$D/account" ] || { echo "You are not logged in." >&2; exit 1; }
+    case "${FAKE_BW_LOGOUT_BUG:-}" in
+      fails) echo "Logout failed." >&2; exit 1 ;;
+      silent) ;;
+      *) rm "$D/account" ;;
+    esac ;;
+  sync) echo 'Syncing complete.' ;;
+  list)
+    case "$#:$2" in
+      2:items) cat "$FAKE_BW_VAULTS/$(cat "$D/account").json" ;;
+      2:folders) cat "$FAKE_BW_FOLDERS" ;;
+      *) echo "Invalid command: $*" >&2; exit 1 ;;
+    esac ;;
+  *) echo "Invalid command: $*" >&2; exit 1 ;;
+esac
+EOF
+printf '#!/bin/bash\necho "$*" >>"$FAKE_OPEN_LOG"\n' >"$WORK/mu-bin/open"
+chmod +x "$MU_APP/bin/bw" "$WORK/mu-bin/open"
+cp "$FX/items.json" "$WORK/vaults/mom@example.com.json"
+cp "$FX/items.json" "$WORK/vaults/owner@example.com.json"
+cp "$FX/dupes.json" "$WORK/vaults/kelly@example.com.json"
+echo '[{"id":"d1","type":1,"name":"Dad bank","deletedDate":null,"login":{"username":"dad","password":"Vt6#qLp9$wZ3mK8x!r","uris":[{"uri":"https://dadbank.example.com"}]}}]' >"$WORK/vaults/dad@example.com.json"
+UV_CACHE="$(uv cache dir)"; UV_PYTHONS="$(uv python dir)"  # the stand-in home must not download Python again
+: >"$MU_BWLOG"; : >"$MU_OPENLOG"
+mu() { # mu <account email> <tty file> <args...>: one run from this checkout, with its own scripts
+  local email="$1" tty="$2"; shift 2
+  env -u BW_SESSION -u BW_HEALTH_BASE_URL HOME="$MU_HOME" PATH="$WORK/mu-bin:$PATH" UV_CACHE_DIR="$UV_CACHE" UV_PYTHON_INSTALL_DIR="$UV_PYTHONS" \
+    BW_HEALTH_TTY="$tty" FAKE_BW_EMAIL="$email" FAKE_BW_LOG="$MU_BWLOG" FAKE_BW_VAULTS="$WORK/vaults" FAKE_BW_FOLDERS="$FX/folders.json" \
+    FAKE_OPEN_LOG="$MU_OPENLOG" /bin/bash bw-health.sh "$@"
+}
+snapshot() { ( cd "$1" && find . -type f -exec shasum {} + | sort ); } # every file under a folder, with its hash
+bw_calls_since() { tail -n "+$(($1 + 1))" "$MU_BWLOG"; }                # <line count before a run>
+
+# Both people's exports are in Downloads at once: the case that used to mix one into the other's vault.
+cp "$FX/chrome.csv" "$MU_DL/Google Passwords.csv"
+cp "$FX/apple.csv" "$MU_DL/Passwords.csv"; touch -t "$(date -v-1H +%Y%m%d%H%M)" "$MU_DL/Passwords.csv"
+cp "$FX/chrome2.csv" "$MU_DL/Old Passwords.csv"; touch -t "$(date -v-10d +%Y%m%d%H%M)" "$MU_DL/Old Passwords.csv"
+printf 'url,title\nhttps://x.com,not a password file\n' >"$MU_DL/other.csv"
+
+# mom, first run: sign in, report, then the list of exports. Three answers that are refused, then file 1.
+printf '4\n1 1\nhunter2\n1\n' >"$WORK/tty-mom"
+mu mom@example.com "$WORK/tty-mom" --user mom >"$WORK/mu1.log" 2>&1 || { cat "$WORK/mu1.log"; echo "FAIL mom's first run"; exit 1; }
+expect "$WORK/mu1.log" 'Using the report scripts beside this file' "a profile run from a checkout uses its own scripts"
+expect "$WORK/mu1.log" "Profile mom: sign in to Bitwarden. Type mom's email" "a new profile is asked to sign in"
+expect "$WORK/mu1.log" 'Profile mom: this run uses the vault of mom@example.com' "the run says whose vault the profile holds"
+grep -qx 'profiles/mom/data login --raw' "$MU_BWLOG" || { cat "$MU_BWLOG"; echo "FAIL mom did not sign in to her own data folder"; exit 1; }
+expect "$WORK/mu1.log" '^  1  Google Passwords.csv  \(chrome, saved [0-9-]+ [0-9:]+\)$' "the newest export is listed first, with its kind and time"
+expect "$WORK/mu1.log" '^  2  Passwords.csv  \(apple, saved [0-9-]+ [0-9:]+\)$' "the second export is listed"
+expect "$WORK/mu1.log" '^  3  Old Passwords.csv  \(chrome, saved [0-9-]+ [0-9:]+, older than 7 days\)$' "an old export is listed and marked as old"
+! grep -q 'other.csv' "$WORK/mu1.log" || { echo "FAIL a csv that is not a password export was listed"; exit 1; }
+[ "$(grep -o 'Each answer must be one of the numbers 1 to 3, used once' "$WORK/mu1.log" | wc -l | tr -d ' ')" = "3" ] || { cat "$WORK/mu1.log"; echo "FAIL a number past the list, a repeated number and a word must each be refused and asked again"; exit 1; }
+! grep -q 'hunter2' "$WORK/mu1.log" || { echo "FAIL a refused answer was printed back (it could be a password)"; exit 1; }
+expect "$WORK/mu1.log" "Moved Google Passwords.csv to Bitwarden Import/chrome-passwords-$TODAY.csv" "the chosen export is moved"
+expect "$WORK/mu1.log" '2 other password export file\(s\) are still in Downloads, untouched' "the run says what it left in Downloads"
+[ "$(LC_ALL=C ls "$MU_DL" | tr '\n' '|')" = "Old Passwords.csv|Passwords.csv|other.csv|" ] || { ls "$MU_DL"; echo "FAIL only the chosen export may leave Downloads"; exit 1; }
+[ "$(ls "$MOM/Bitwarden Import" | tr '\n' '|')" = "chrome-passwords-$TODAY.csv|conflicts.md|new-for-bitwarden.csv|" ] || { ls "$MOM/Bitwarden Import"; echo "FAIL mom's import folder must hold her export and its diff, nothing else"; exit 1; }
+grep -q 'spotify.com' "$MOM/Bitwarden Import/new-for-bitwarden.csv" && ! grep -q 'library.org' "$MOM/Bitwarden Import/new-for-bitwarden.csv" || { echo "FAIL mom's import file must come from her export only"; exit 1; }
+expect "$WORK/mu1.log" "These files are mom's. Import them only into the vault of mom@example.com" "the import step names the vault the files are for"
+expect "$MU_HOME/Desktop/Bitwarden Report - mom.html" '<td>Logins with a password</td><td>5</td>' "mom's report is her vault, under her name"
+[ "$(tail -1 "$WORK/mu1.log")" = "==> Done. The report is on your Desktop as 'Bitwarden Report - mom.html'. Your vault is locked again." ] || { tail -2 "$WORK/mu1.log"; echo "FAIL the closing line must name the profile's report"; exit 1; }
+[ ! -e "$MU_APP/data" ] && [ ! -e "$MU_APP/Bitwarden Import" ] && [ ! -e "$MU_HOME/Desktop/Bitwarden Report.html" ] || { echo "FAIL a profile run wrote to the shared sign-in, import folder or report"; exit 1; }
+pass "a profile run signs in to its own folder and takes only the export typed for it"
+
+# dad, straight after: his own sign-in, his own folders, and nothing of mom's is read or changed.
+MOM_BEFORE="$(snapshot "$MOM")"; cp "$MU_HOME/Desktop/Bitwarden Report - mom.html" "$WORK/mom-report.html"
+CALLS="$(wc -l <"$MU_BWLOG")"; : >"$MU_OPENLOG"
+printf '1\n' >"$WORK/tty-dad"
+mu dad@example.com "$WORK/tty-dad" --user dad >"$WORK/mu2.log" 2>&1 || { cat "$WORK/mu2.log"; echo "FAIL dad's first run"; exit 1; }
+expect "$WORK/mu2.log" "Profile dad: sign in to Bitwarden" "the second person is asked to sign in, not to unlock the first person's vault"
+expect "$WORK/mu2.log" 'Profile dad: this run uses the vault of dad@example.com' "the second run says it holds the second person's vault"
+bw_calls_since "$CALLS" | grep -qx 'profiles/dad/data login --raw' || { echo "FAIL dad did not sign in to his own data folder"; exit 1; }
+! bw_calls_since "$CALLS" | grep -qv '^profiles/dad/data ' || { bw_calls_since "$CALLS"; echo "FAIL dad's run called bw on another data folder"; exit 1; }
+expect "$WORK/mu2.log" '^  1  Passwords.csv  \(apple, saved' "the export mom left is offered to dad"
+[ "$(ls "$DAD/Bitwarden Import" | tr '\n' '|')" = "apple-passwords-$TODAY.csv|conflicts.md|new-for-bitwarden.csv|" ] || { ls "$DAD/Bitwarden Import"; echo "FAIL dad's import folder must hold his export and its diff"; exit 1; }
+grep -q 'library.org' "$DAD/Bitwarden Import/new-for-bitwarden.csv" && ! grep -q 'spotify.com' "$DAD/Bitwarden Import/new-for-bitwarden.csv" || { echo "FAIL dad's import file must come from his export only"; exit 1; }
+expect "$MU_HOME/Desktop/Bitwarden Report - dad.html" '<td>Logins with a password</td><td>1</td>' "dad's report is his vault, under his name"
+[ "$(snapshot "$MOM")" = "$MOM_BEFORE" ] && cmp -s "$MU_HOME/Desktop/Bitwarden Report - mom.html" "$WORK/mom-report.html" || { echo "FAIL dad's run changed mom's folder or report"; exit 1; }
+grep -qxF "$MU_HOME/Desktop/Bitwarden Report - dad.html" "$MU_OPENLOG" && grep -qxF "$DAD/Bitwarden Import" "$MU_OPENLOG" && ! grep -q 'mom' "$MU_OPENLOG" || { cat "$MU_OPENLOG"; echo "FAIL dad's run must open his report and his import folder only"; exit 1; }
+pass "two profiles back to back keep separate sign-ins, import folders and reports"
+
+# mom again: her profile is still signed in, so this is an unlock. --logout-after with a bw that cannot
+# sign out must end in an error and leave her signed in, not claim she is signed out.
+printf 'skip\n' >"$WORK/tty-skip"; printf '\n' >"$WORK/tty-return"
+CALLS="$(wc -l <"$MU_BWLOG")"
+if FAKE_BW_LOGOUT_BUG=fails mu mom@example.com "$WORK/tty-return" --logout-after --user mom >"$WORK/mu3.log" 2>&1; then
+  cat "$WORK/mu3.log"; echo "FAIL a run whose sign-out failed ended successfully"; exit 1
+fi
+expect "$WORK/mu3.log" 'Profile mom is signed in as mom@example.com. Unlock that vault' "a signed-in profile names its account before asking for the password"
+bw_calls_since "$CALLS" | grep -qx 'profiles/mom/data unlock --raw' && ! bw_calls_since "$CALLS" | grep -q ' login ' || { echo "FAIL a signed-in profile must unlock, not sign in again"; exit 1; }
+expect "$WORK/mu3.log" '^  1  Old Passwords.csv ' "with only an old export left, it is still listed, never taken silently"
+expect "$WORK/mu3.log" 'each file that is mom' "the question names the profile"
+expect "$WORK/mu3.log" "Done. The report is on your Desktop as 'Bitwarden Report - mom.html'" "the run itself finished"
+expect "$WORK/mu3.log" 'Profile mom: Bitwarden could NOT be signed out on this Mac' "a failed sign-out after a finished run is an error"
+[ -f "$MOM/data/account" ] && [ -f "$MU_DL/Old Passwords.csv" ] || { echo "FAIL test setup: mom should still be signed in and the old export untouched"; exit 1; }
+pass "--logout-after reports a sign-out that did not happen"
+
+# A word at the list is refused and asked again; a keyboard that then stops answering is an error.
+if mu mom@example.com "$WORK/tty-skip" --user mom exports >"$WORK/mu3b.log" 2>&1; then cat "$WORK/mu3b.log"; echo "FAIL the exports step ended successfully with no usable answer"; exit 1; fi
+expect "$WORK/mu3b.log" 'Each answer must be one of the numbers 1 to 1, used once' "a word typed at the list is refused"
+expect "$WORK/mu3b.log" 'no answer came from the keyboard' "a keyboard that stops answering is an error, not a silent exit"
+[ -f "$MU_DL/Old Passwords.csv" ] || { echo "FAIL an export was moved without being chosen"; exit 1; }
+
+if FAKE_BW_LOGOUT_BUG=silent mu mom@example.com /dev/null --user mom logout >"$WORK/mu4.log" 2>&1; then
+  cat "$WORK/mu4.log"; echo "FAIL logout succeeded although bw stayed signed in"; exit 1
+fi
+expect "$WORK/mu4.log" 'Bitwarden could not be signed out' "logout checks that bw is signed out, not only that bw said so"
+mu mom@example.com /dev/null --user mom logout >"$WORK/mu5.log" 2>&1 || { cat "$WORK/mu5.log"; echo "FAIL mom's logout"; exit 1; }
+expect "$WORK/mu5.log" 'Profile mom: Bitwarden is signed out on this Mac' "logout signs the profile out"
+expect "$WORK/mu5.log" 'still holds files with plain-text passwords: .*/profiles/mom/Bitwarden Import' "logout points at the import files the profile left behind"
+[ ! -e "$MOM/data/account" ] && [ -f "$DAD/data/account" ] || { echo "FAIL logout must sign out that profile and no other"; exit 1; }
+mu mom@example.com /dev/null logout --user mom >"$WORK/mu6.log" 2>&1 || { cat "$WORK/mu6.log"; echo "FAIL a second logout"; exit 1; }
+expect "$WORK/mu6.log" 'Profile mom: Bitwarden was not signed in on this Mac' "a second logout says there was nothing to sign out"
+if mu mom@example.com /dev/null --user mmo logout >"$WORK/mu7.log" 2>&1; then cat "$WORK/mu7.log"; echo "FAIL logout of a profile that does not exist succeeded"; exit 1; fi
+expect "$WORK/mu7.log" 'no profile named mmo has been used on this Mac. Profiles here: dad mom' "a mistyped profile name is not reported as signed out"
+[ ! -e "$MU_APP/profiles/mmo" ] || { echo "FAIL a mistyped logout created a profile"; exit 1; }
+pass "logout signs out one profile, checks it, and refuses a name that was never used"
+
+# dad again with --logout-after: unlock, run, lock, then sign out. The remaining old export is skipped.
+CALLS="$(wc -l <"$MU_BWLOG")"
+mu dad@example.com "$WORK/tty-return" --user dad --logout-after >"$WORK/mu8.log" 2>&1 || { cat "$WORK/mu8.log"; echo "FAIL dad's --logout-after run"; exit 1; }
+expect "$WORK/mu8.log" 'Profile dad is signed in as dad@example.com' "the second run of a profile unlocks it"
+expect "$WORK/mu8.log" 'No file chosen; skipping the import step. Nothing in Downloads was touched' "Return at the list skips the import step"
+[ "$(tail -1 "$WORK/mu8.log")" = "==> Profile dad: Bitwarden is signed out on this Mac." ] || { tail -3 "$WORK/mu8.log"; echo "FAIL --logout-after must end by saying the profile is signed out"; exit 1; }
+[ "$(bw_calls_since "$CALLS" | grep -E ' (lock|logout)$' | tr '\n' '|')" = "profiles/dad/data lock|profiles/dad/data logout|" ] || { bw_calls_since "$CALLS"; echo "FAIL the run must lock, then sign out, once each"; exit 1; }
+[ ! -e "$DAD/data/account" ] && [ -f "$MU_DL/Old Passwords.csv" ] || { echo "FAIL dad is still signed in, or an export that was not chosen was moved"; exit 1; }
+pass "--logout-after locks and signs the profile out when the run ends"
+
+# The dedupe step for a profile, with --user after the step words: the plan lands in that profile's folder.
+rm "$MU_DL/Old Passwords.csv"
+mu kelly@example.com /dev/null dedupe exact --user kelly >"$WORK/mu9.log" 2>&1 || { cat "$WORK/mu9.log"; echo "FAIL a profile's dedupe preview"; exit 1; }
+expect "$WORK/mu9.log" 'Plan: .*/profiles/kelly/Dedupe Plan/plan-exact.md' "a profile's dedupe plan is written to its own folder"
+[ -f "$MU_APP/profiles/kelly/Dedupe Plan/plan-exact.md" ] && [ ! -e "$MU_APP/Dedupe Plan" ] && [ ! -e "$MOM/Dedupe Plan" ] || { echo "FAIL the dedupe plan landed outside the profile's folder"; exit 1; }
+mu kelly@example.com "$WORK/tty-skip" --user kelly exports >"$WORK/mu9b.log" 2>&1 || { cat "$WORK/mu9b.log"; echo "FAIL a profile's exports step"; exit 1; }
+expect "$WORK/mu9b.log" "To import kelly's old passwords, put their export in the Downloads folder of this Mac" "with no export, a profile is told to bring that person's own export"
+expect "$WORK/mu9b.log" "not kelly's" "the prompt warns that this Mac's Passwords app is not that person's"
+pass "dedupe and exports follow the profile"
+
+# No --user: the shared sign-in, folders, report name and silent export pick-up, exactly as before profiles.
+MOM_BEFORE="$(snapshot "$MOM")"; DAD_BEFORE="$(snapshot "$DAD")"
+cp "$FX/chrome.csv" "$MU_DL/Google Passwords.csv"
+CALLS="$(wc -l <"$MU_BWLOG")"
+mu owner@example.com /dev/null >"$WORK/mu10.log" 2>&1 || { cat "$WORK/mu10.log"; echo "FAIL a run without --user"; exit 1; }
+! grep -q 'Profile\|Type the number' "$WORK/mu10.log" || { cat "$WORK/mu10.log"; echo "FAIL a run without --user mentioned a profile or asked which export to take"; exit 1; }
+expect "$WORK/mu10.log" '^==> Sign in to Bitwarden. Type your email, then your master password \(nothing shows while typing\), then the two-step code if asked\.$' "without --user the sign-in wording is unchanged"
+expect "$WORK/mu10.log" "Moved Google Passwords.csv to Bitwarden Import/chrome-passwords-$TODAY.csv" "without --user a fresh export is still picked up without asking"
+! bw_calls_since "$CALLS" | grep -qv '^data ' || { bw_calls_since "$CALLS"; echo "FAIL a run without --user must use the shared data folder only"; exit 1; }
+[ -f "$MU_APP/data/account" ] && [ -f "$MU_APP/Bitwarden Import/new-for-bitwarden.csv" ] || { echo "FAIL a run without --user must use the shared sign-in and import folder"; exit 1; }
+expect "$MU_HOME/Desktop/Bitwarden Report.html" '<td>Logins with a password</td><td>5</td>' "without --user the report keeps its name"
+[ "$(tail -1 "$WORK/mu10.log")" = "==> Done. The report is on your Desktop as 'Bitwarden Report.html'. Your vault is locked again." ] || { tail -2 "$WORK/mu10.log"; echo "FAIL without --user the closing line must be unchanged"; exit 1; }
+[ "$(bw_calls_since "$CALLS" | tail -1)" = "data lock" ] || { echo "FAIL without --logout-after the run must end by locking, not signing out"; exit 1; }
+[ "$(snapshot "$MOM")" = "$MOM_BEFORE" ] && [ "$(snapshot "$DAD")" = "$DAD_BEFORE" ] || { echo "FAIL a run without --user changed a profile's folder"; exit 1; }
+mu owner@example.com /dev/null logout >"$WORK/mu11.log" 2>&1 || { cat "$WORK/mu11.log"; echo "FAIL logout without --user"; exit 1; }
+expect "$WORK/mu11.log" '^==> Bitwarden is signed out on this Mac\.$' "logout without --user signs out the shared sign-in"
+[ ! -e "$MU_APP/data/account" ] || { echo "FAIL the shared sign-in is still signed in"; exit 1; }
+pass "without --user everything is where it was; logout works there too"
+
 # No person is named in the tool, its messages, its tests or its docs: whoever shares the paste line is
 # "the person who sent you this line". Cannot catch a name other than the one it looks for.
 ! git grep -nw -e 'R[o]b' -- . ':!tests/fixture' || { echo "FAIL a personal name is hard-coded in the tool, its tests or its docs"; exit 1; }

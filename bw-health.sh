@@ -4,18 +4,62 @@
 #   curl -fsSL <BASE_URL>/bw-health.sh | bash -s -- check              # install only
 #   curl -fsSL <BASE_URL>/bw-health.sh | bash -s -- dedupe exact|merge|pick # duplicate cleanup preview (read-only)
 #   curl -fsSL <BASE_URL>/bw-health.sh | bash -s -- dedupe merge apply [N]   # act on it, after a typed confirmation
+#   curl -fsSL <BASE_URL>/bw-health.sh | bash -s -- logout             # sign out of Bitwarden on this Mac
 #   bash bw-health.sh exports                                          # stage Downloads exports only
+# Several people on one Mac account: add --user NAME to any line (own sign-in, folders and report),
+# and --logout-after to sign that person out when the run ends.
 # Only the dedupe step ever changes the vault; see README.md.
 
 set -euo pipefail
+
+say()  { printf '\n==> %s\n' "$*"; }
+fail() { printf '\nSomething went wrong: %s\nSend a screenshot of this window to the person who sent you this line.\n' "$*" >&2; exit 1; }
+
+# --- what to run, and for whom: checked before anything is installed or asked ------------------
+# --user NAME and --logout-after may sit anywhere on the line; the words left over are the step.
+PROFILE=""; PROFILE_GIVEN=0; LOGOUT_AFTER=0; words=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --user)
+      [ "$PROFILE_GIVEN" = 0 ] || fail "--user was given twice"
+      [ "$#" -ge 2 ] || fail "--user needs a name after it, for example: --user mom"
+      PROFILE="$2"; PROFILE_GIVEN=1; shift 2 ;;
+    --logout-after) LOGOUT_AFTER=1; shift ;;
+    --*) fail "unknown option: $1" ;;
+    *) words+=("$1"); shift ;;
+  esac
+done
+set -- ${words[@]+"${words[@]}"}
+if [ "$PROFILE_GIVEN" = 1 ]; then
+  [[ "$PROFILE" =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]] || fail "a --user name is 1 to 32 lowercase letters, digits or hyphens, and starts with a letter or digit (for example: mom)"
+fi
+case "${1:-}" in
+  "") ;;
+  check|exports|logout)
+    [ -z "${2:-}" ] || fail "nothing is allowed after $1"
+    [ "$LOGOUT_AFTER" = 0 ] || fail "--logout-after goes with a run that signs in, not with $1" ;;
+  dedupe)
+    case "${2:-}" in exact|merge|pick) ;; *) fail "use: dedupe exact, dedupe merge or dedupe pick. Add apply to act, then a number to limit how many groups." ;; esac
+    case "${3:-}" in ""|apply) ;; *) fail "after the stage, the only word allowed is apply" ;; esac
+    [ -z "${4:-}" ] || { [ "${3:-}" = apply ] && [[ "$4" =~ ^[1-9][0-9]*$ ]]; } || fail "a limit goes after apply and is a whole number, 1 or more"
+    [ -z "${5:-}" ] || fail "nothing is allowed after the limit" ;;
+  *) fail "unknown step: $1. Leave it out for the check-up, or use check, exports, dedupe or logout." ;;
+esac
 
 BASE_URL="${BW_HEALTH_BASE_URL:-https://raw.githubusercontent.com/nellirob92/bw-health/main}"
 APP_DIR="$HOME/Library/Application Support/bw-health"
 BIN_DIR="$APP_DIR/bin"
 REPORT_DIR="$HOME/Desktop"
+# A profile (--user NAME) has its own sign-in, import folder, dedupe plan and report, so several
+# people can take turns on one Mac account. Without one, everything is where it has always been.
+if [ -n "$PROFILE" ]; then
+  PROFILE_DIR="$APP_DIR/profiles/$PROFILE"; REPORT_NAME="Bitwarden Report - $PROFILE.html"; TAG="Profile $PROFILE: "
+else
+  PROFILE_DIR="$APP_DIR"; REPORT_NAME="Bitwarden Report.html"; TAG=""
+fi
 # Under Library, never Desktop: iCloud's Desktop sync would upload the plain-text exports.
-IMPORT_DIR="$APP_DIR/Bitwarden Import"
-DEDUPE_DIR="$APP_DIR/Dedupe Plan"
+IMPORT_DIR="$PROFILE_DIR/Bitwarden Import"
+DEDUPE_DIR="$PROFILE_DIR/Dedupe Plan"
 UV="$HOME/.local/bin/uv"
 BW="$BIN_DIR/bw"
 # Pinned: the download is a release file, not a GitHub API lookup (the API rate-limits shared IPs).
@@ -23,9 +67,21 @@ BW="$BIN_DIR/bw"
 BW_CLI_VERSION="2026.10.0"
 BW_CLI_SHA256_ARM64="062c880508678b8d936ab2522a3a1e92d60f52b5c534e71406e9b47329e95207"
 BW_CLI_SHA256_X64="39602a597ca63127c22ee3844546f3fe06079e4f67be7b9a7ea4e30ede8721d0"
+SCRIPTS="bw_report.py bw_import_diff.py bw_dedupe.py"
 
-say()  { printf '\n==> %s\n' "$*"; }
-fail() { printf '\nSomething went wrong: %s\nSend a screenshot of this window to the person who sent you this line.\n' "$*" >&2; exit 1; }
+# Run as a file with the report scripts beside it (a clone), this uses those, so a branch can be
+# tried before it is released. Piped from curl there is no file, and BW_HEALTH_BASE_URL still wins.
+LOCAL_SRC=""
+if [ -z "${BW_HEALTH_BASE_URL:-}" ] && [ -n "${BASH_SOURCE[0]:-}" ]; then
+  self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  beside=0
+  for f in $SCRIPTS; do [ ! -f "$self_dir/$f" ] || beside=$((beside + 1)); done
+  case "$beside" in
+    0) ;;
+    3) LOCAL_SRC="$self_dir" ;;
+    *) fail "only some of the report scripts are beside bw-health.sh in $self_dir. Expected all three, or none." ;;
+  esac
+fi
 
 # A failed unlock is almost always a mistyped master password; say so in plain words (bw's own lines stay above it).
 fail_unlock() {
@@ -76,6 +132,17 @@ export_kind() {
 STAGED=()
 MOVED=0
 TTY="${BW_HEALTH_TTY:-/dev/tty}"
+# The keyboard is opened once, so successive answers are successive lines (under curl | bash,
+# stdin is the script itself).
+KEYBOARD_OPEN=0
+ask() { # <prompt>; sets ANSWER
+  if [ "$KEYBOARD_OPEN" = 0 ]; then
+    exec 3<"$TTY" || fail "could not read from the keyboard"
+    KEYBOARD_OPEN=1
+  fi
+  printf '%s' "$1"
+  read -r ANSWER <&3 || fail "no answer came from the keyboard"
+}
 move_export() { # <file> <kind> <mtime>; sets LAST_DEST
   local base n=2
   base="$IMPORT_DIR/$2-passwords-$(date -r "$3" +%Y-%m-%d)"
@@ -87,7 +154,8 @@ move_export() { # <file> <kind> <mtime>; sets LAST_DEST
   say "Moved $(basename "$1") to Bitwarden Import/$(basename "$LAST_DEST")"
 }
 stage_exports() {
-  local attempt f kind mtime cutoff stale_note fresh answer
+  local attempt f kind mtime cutoff stale_note fresh
+  if [ -n "$PROFILE" ]; then pick_exports; return 0; fi
   mkdir -p "$IMPORT_DIR"
   for attempt in 1 2; do
     stale_note=""; fresh=""
@@ -114,9 +182,8 @@ To import old passwords, export them now (the file lands in Downloads):
   Chrome: go to passwords.google.com, click the gear, then Export passwords.
   Apple:  open the Passwords app on this Mac, File menu, Export All Passwords.
 EOT
-    printf 'Press Return when the export is done, or type skip and Return: '
-    read -r answer <"$TTY"
-    [ "$answer" != "skip" ] || { say "Skipping the import step"; return 0; }
+    ask 'Press Return when the export is done, or type skip and Return: '
+    [ "$ANSWER" != "skip" ] || { say "Skipping the import step"; return 0; }
   done
   while IFS="$(printf '\t')" read -r mtime kind f; do
     move_export "$f" "$kind" "$mtime"
@@ -124,8 +191,102 @@ EOT
   done <<<"$(printf '%s' "$fresh" | sort -rn)"
 }
 
+# A profile run never takes a file on its own: Downloads can hold several people's exports at
+# once. Every password export is listed, and only the ones typed for this person are moved and
+# compared. The rest stay in Downloads, untouched.
+pick_exports() {
+  local attempt f kind mtime found i n tok ok chosen old cutoff left tab
+  local files=() kinds=() mtimes=() picks=()
+  tab="$(printf '\t')"
+  mkdir -p "$IMPORT_DIR"
+  for attempt in 1 2; do
+    found=""
+    shopt -s nullglob
+    for f in "$HOME/Downloads"/*.csv "$HOME/Downloads"/*.CSV; do
+      kind="$(export_kind "$f")"; [ -n "$kind" ] || continue
+      found="$found$(stat -f %m "$f")$tab$kind$tab$f
+"
+    done
+    shopt -u nullglob
+    [ -z "$found" ] || break
+    [ "$attempt" = 1 ] || { say "Still no password export in Downloads; skipping the import step"; return 0; }
+    say "No password export in Downloads."
+    cat <<EOT
+To import $PROFILE's old passwords, put their export in the Downloads folder of this Mac now:
+  Chrome: sign in at passwords.google.com as $PROFILE, click the gear, then Export passwords.
+  Apple:  on $PROFILE's own Mac, open the Passwords app, File menu, Export All Passwords,
+          then AirDrop the file to this Mac. The Passwords app on this Mac holds the passwords
+          of this Mac's own Apple Account, not $PROFILE's.
+EOT
+    ask 'Press Return when the export is in Downloads, or type skip and Return: '
+    [ "$ANSWER" != "skip" ] || { say "Skipping the import step"; return 0; }
+  done
+  while IFS="$tab" read -r mtime kind f; do
+    files+=("$f"); kinds+=("$kind"); mtimes+=("$mtime")
+  done <<<"$(printf '%s' "$found" | sort -rn)"
+  n="${#files[@]}"
+  cutoff=$(( $(date +%s) - 7*24*3600 ))
+  say "Password exports in Downloads, newest first:"
+  for ((i = 0; i < n; i++)); do
+    old=""; [ "${mtimes[$i]}" -ge "$cutoff" ] || old=", older than 7 days"
+    printf '  %d  %s  (%s, saved %s%s)\n' "$((i + 1))" "$(basename "${files[$i]}" | tr -d '[:cntrl:]')" \
+      "${kinds[$i]}" "$(date -r "${mtimes[$i]}" '+%Y-%m-%d %H:%M')" "$old"
+  done
+  while :; do
+    ask "Type the number of each file that is $PROFILE's, with spaces between (for example: 1 2), or press Return to skip: "
+    [ -n "$ANSWER" ] || { say "No file chosen; skipping the import step. Nothing in Downloads was touched."; return 0; }
+    read -r -a picks <<<"$ANSWER"
+    chosen=" "; ok=1
+    for tok in "${picks[@]}"; do
+      if [[ "$tok" =~ ^[1-9][0-9]{0,2}$ ]] && [ "$tok" -le "$n" ] && [[ "$chosen" != *" $tok "* ]]; then
+        chosen="$chosen$tok "
+      else
+        ok=0
+      fi
+    done
+    [ "$ok" = 0 ] || break
+    # The answer is never echoed: it could be a password typed by mistake.
+    echo "Each answer must be one of the numbers 1 to $n, used once. Nothing was moved."
+  done
+  for ((i = 0; i < n; i++)); do
+    [[ "$chosen" == *" $((i + 1)) "* ]] || continue
+    move_export "${files[$i]}" "${kinds[$i]}" "${mtimes[$i]}"
+    STAGED+=("$LAST_DEST")
+  done
+  left=$((n - ${#STAGED[@]}))
+  [ "$left" = 0 ] || say "$left other password export file(s) are still in Downloads, untouched. They hold plain-text passwords: trash them once their owner's run is done."
+}
+
+bw_status() { "$BW" status | /usr/bin/jq -r "$1"; } # <jq filter>
+sign_out() { "$BW" logout </dev/null >/dev/null && [ "$(bw_status .status)" = "unauthenticated" ]; }
+account_email() {
+  local email
+  email="$(bw_status '.userEmail // empty')" || fail "could not read Bitwarden's sign-in status"
+  [ -n "$email" ] || fail "Bitwarden did not say which account profile $PROFILE is signed in as"
+  printf '%s' "$email"
+}
+# Runs however the run ends once sign-in has succeeded: the vault is always locked, and the
+# account is signed out when --logout-after asked for it.
+finish() {
+  local code=$?
+  "$BW" lock >/dev/null 2>&1 || true
+  if [ "$LOGOUT_AFTER" = 1 ]; then
+    if sign_out; then
+      say "${TAG}Bitwarden is signed out on this Mac."
+    else
+      printf '\n%sBitwarden could NOT be signed out on this Mac. Run the line again with logout in place of --logout-after.\n' "$TAG" >&2
+      code=1
+    fi
+  fi
+  exit "$code"
+}
+
 [ "$(uname -s)" = "Darwin" ] || fail "this script is for a Mac"
-export BITWARDENCLI_APPDATA_DIR="$APP_DIR/data"
+if [ "${1:-}" = "logout" ] && [ -n "$PROFILE" ] && [ ! -d "$PROFILE_DIR" ]; then
+  # A mistyped name must not report "nothing to sign out" while the real profile stays signed in.
+  fail "no profile named $PROFILE has been used on this Mac. Profiles here: $(ls "$APP_DIR/profiles" 2>/dev/null | tr '\n' ' ')"
+fi
+export BITWARDENCLI_APPDATA_DIR="$PROFILE_DIR/data"
 mkdir -p "$BIN_DIR" "$BITWARDENCLI_APPDATA_DIR"
 
 # --- 1. tools -------------------------------------------------------------------------------
@@ -150,10 +311,17 @@ if [ ! -x "$BW" ]; then
   chmod +x "$BW"
 fi
 
-say "Fetching the report scripts"
-for f in bw_report.py bw_import_diff.py bw_dedupe.py; do
-  curl -fsSL "$BASE_URL/$f" -o "$APP_DIR/$f" || fail "could not download $f"
-done
+if [ -n "$LOCAL_SRC" ]; then
+  say "Using the report scripts beside this file ($LOCAL_SRC), not the published ones"
+  for f in $SCRIPTS; do
+    cp "$LOCAL_SRC/$f" "$APP_DIR/$f" || fail "could not copy $f"
+  done
+else
+  say "Fetching the report scripts"
+  for f in $SCRIPTS; do
+    curl -fsSL "$BASE_URL/$f" -o "$APP_DIR/$f" || fail "could not download $f"
+  done
+fi
 
 case "${1:-}" in
   check)
@@ -165,27 +333,49 @@ case "${1:-}" in
     stage_exports
     printf '%s\n' ${STAGED[@]+"${STAGED[@]}"}
     exit 0 ;;
-  dedupe)
-    case "${2:-}" in exact|merge|pick) ;; *) fail "use: dedupe exact, dedupe merge or dedupe pick. Add apply to act, then a number to limit how many groups." ;; esac
-    case "${3:-}" in ""|apply) ;; *) fail "after the stage, the only word allowed is apply" ;; esac
-    [ -z "${4:-}" ] || { [ "${3:-}" = apply ] && [[ "$4" =~ ^[1-9][0-9]*$ ]]; } || fail "a limit goes after apply and is a whole number, 1 or more"
-    [ -z "${5:-}" ] || fail "nothing is allowed after the limit" ;;
+  logout)
+    status="$(bw_status .status)" || fail "could not read Bitwarden's sign-in status"
+    if [ "$status" = "unauthenticated" ]; then
+      say "${TAG}Bitwarden was not signed in on this Mac, so there was nothing to sign out."
+    else
+      sign_out || fail "Bitwarden could not be signed out"
+      say "${TAG}Bitwarden is signed out on this Mac."
+    fi
+    if [ -d "$IMPORT_DIR" ] && [ -n "$(find "$IMPORT_DIR" -type f ! -name .DS_Store | head -1)" ]; then
+      say "The Bitwarden Import folder still holds files with plain-text passwords: $IMPORT_DIR
+Drag it to the Trash and empty it once the import is done."
+    fi
+    exit 0 ;;
 esac
 
 # --- 2. sign in -----------------------------------------------------------------------------
 # `login --raw` and `unlock --raw` both print the session key, so each path asks for the
 # master password exactly once.
-status="$("$BW" status | /usr/bin/jq -r .status)"
+status="$(bw_status .status)" || fail "could not read Bitwarden's sign-in status"
 if [ "$status" = "unauthenticated" ]; then
-  say "Sign in to Bitwarden. Type your email, then your master password (nothing shows while typing), then the two-step code if asked."
+  if [ -n "$PROFILE" ]; then
+    say "Profile $PROFILE: sign in to Bitwarden. Type $PROFILE's email, then the master password (nothing shows while typing), then the two-step code if asked."
+  else
+    say "Sign in to Bitwarden. Type your email, then your master password (nothing shows while typing), then the two-step code if asked."
+  fi
   BW_SESSION="$("$BW" login --raw <"$TTY")" || fail_login
 else
-  say "Unlock your vault: type your master password"
+  if [ -n "$PROFILE" ]; then
+    ACCOUNT="$(account_email)"
+    say "Profile $PROFILE is signed in as $ACCOUNT. Unlock that vault: type its master password"
+  else
+    say "Unlock your vault: type your master password"
+  fi
   BW_SESSION="$("$BW" unlock --raw <"$TTY")" || fail_unlock
 fi
 [ -n "$BW_SESSION" ] || fail "no session key came back from Bitwarden"
 export BW_SESSION
-trap '"$BW" lock >/dev/null 2>&1 || true' EXIT
+trap finish EXIT
+if [ -n "$PROFILE" ]; then
+  # Shown on every profile run, so a vault signed in under the wrong name is seen before it is used.
+  ACCOUNT="$(account_email)"
+  say "Profile $PROFILE: this run uses the vault of $ACCOUNT"
+fi
 
 # --- 3. health report -----------------------------------------------------------------------
 say "Checking every password (this can take a minute)"
@@ -201,7 +391,7 @@ if [ "${1:-}" = "dedupe" ]; then
   exit 0
 fi
 
-report="$REPORT_DIR/Bitwarden Report.html"
+report="$REPORT_DIR/$REPORT_NAME"
 "$UV" run --quiet "$APP_DIR/bw_report.py" --html --out "$report" || fail "report failed"
 open "$report"
 say "This check only reads your vault. It never merges, deletes or changes anything. Cleaning up duplicates is a separate step you start yourself, and it shows you everything first."
@@ -220,6 +410,7 @@ then drag "new-for-bitwarden.csv" from that Finder window into the file picker.
 Read "conflicts.md" in the same folder. When done, drag the whole folder to the Trash
 and empty it: the files inside contain your passwords in plain text.
 EOT
+  [ -z "$PROFILE" ] || say "These files are $PROFILE's. Import them only into the vault of $ACCOUNT."
   case " ${STAGED[*]} " in *"/apple-passwords-"*) cat <<'EOT'
 
 Passkeys: an Apple csv export carries passwords only, never passkeys (Face ID sign-ins).
@@ -233,4 +424,4 @@ elif [ "$MOVED" -gt 0 ]; then
   say "$MOVED old export file(s) were moved into the Bitwarden Import folder that just opened. Drag it to the Trash and empty it: they contain your passwords in plain text."
 fi
 
-say "Done. The report is on your Desktop as 'Bitwarden Report.html'. Your vault is locked again."
+say "Done. The report is on your Desktop as '$REPORT_NAME'. Your vault is locked again."

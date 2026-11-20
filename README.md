@@ -6,6 +6,7 @@ can tidy duplicate entries. It works on the free Bitwarden plan.
 
 - [Run the check-up](#run-the-check-up)
 - [Move your old passwords in](#move-your-old-passwords-in)
+- [Several people on one Mac](#several-people-on-one-mac)
 - [Clean up duplicates](#clean-up-duplicates)
 - [If something goes wrong](#if-something-goes-wrong)
 - [Privacy and safety](#privacy-and-safety)
@@ -50,6 +51,31 @@ ever shown. It locks your vault again when it finishes.
 
 An Apple csv export never includes passkeys. The run says so and tells you how to move them with the
 iPhone's transfer.
+
+## Several people on one Mac
+
+To check several people's vaults from one Mac account, one after another, give each person a name with
+`--user`. Add the words after `bash -s --` on the paste line:
+
+```
+curl -fsSL https://raw.githubusercontent.com/nellirob92/bw-health/main/bw-health.sh | bash -s -- --user mom
+```
+
+| Add this | What happens |
+| --- | --- |
+| `--user mom` | The check-up for mom, with her own Bitwarden sign-in, import folder, dedupe plan and report (`Bitwarden Report - mom.html`). The name is lowercase letters, digits and hyphens. |
+| `--user mom dedupe merge` | Any other step, for mom. |
+| `--user mom logout` | Signs mom out of Bitwarden on this Mac. |
+| `--user mom --logout-after` | Signs mom out when the run ends. |
+
+- Every run with a name says which Bitwarden account that name is signed in as. Check it before going on.
+- Exports are never picked up on their own. The run lists the password export files in Downloads and asks
+  which ones are that person's. Only those are moved, into that person's folder under
+  `~/Library/Application Support/bw-health/profiles`. The rest stay in Downloads, so trash them when their
+  owner's run is done.
+- The Passwords app on the Mac holds the passwords of the Mac's own Apple Account. For someone else,
+  export on their own Mac and AirDrop the file over.
+- Without `--user`, nothing changes: one shared sign-in, the same folders and `Bitwarden Report.html`.
 
 ## Clean up duplicates
 
@@ -129,6 +155,8 @@ A plan listing every group (names and counts, never a password) is written to
 - **Tests:** `bash tests/run.sh` on a Mac (needs `uv` and a network connection). CI runs it on a macOS
   runner for every push.
 - **A merge to `main` is a release:** the paste line fetches the scripts from `main` on every run.
+- **Trying a branch before it is merged:** run `bash bw-health.sh` from a checkout. Run as a file with the
+  three Python scripts beside it, it uses those and says so. `BW_HEALTH_BASE_URL` still overrides that.
 - **Bumping the Bitwarden CLI:** edit the version and the two SHA-256 values at the top of `bw-health.sh`,
   taking them from the digests of the `cli-v<version>` release assets.
 - **What the tests cannot show:** how the real `bw` behaves. A new `bw` command or a change to a vault write
