@@ -35,7 +35,7 @@ ever shown. It locks your vault again when it finishes.
 | Reused | The same password is used on more than one account. |
 | Weak | The password is short or predictable. |
 | Duplicate entries | The same site and username is saved more than once. |
-| Two-step login | The site offers two-step login and no code is saved in the entry. Check that it is turned on at the site: the entry cannot show that. |
+| Two-step login | The site offers two-step login and no code is saved in the entry. Check that it is turned on at the site: the entry cannot show that. "Supports" means the saved address is on the public list; "likely supports" means only a related address is. If the list cannot be downloaded, the section says "not checked this run". |
 | AutoFill problems | The entry has no web address, or only an `http://` one, so iPhone AutoFill will not offer it reliably. |
 | Unchanged for 3+ years | The password has not changed in three years. Importing resets these dates, so this only means something on later runs. |
 | Notes that may hold a password | A note with a line like `password: ...`. Only the item's name is shown, never the note. |
@@ -153,7 +153,8 @@ A plan listing every group (names and counts, never a password) is written to
 - No password, and no text from a note, is printed, logged or written to any file.
 - Two things are fetched from the internet during the check-up, and neither names a site, a username or
   you: the breach check sends only a 5-character hash prefix, and the two-step check downloads the whole
-  public [2FA Directory](https://2fa.directory/) list (kept for a day) and compares it on your Mac.
+  public [2FA Directory](https://2fa.directory/) list and compares it on your Mac. The list is kept for a
+  day in your own bw-health folder, and the request carries nothing about you.
 - No site in your vault is ever contacted. The links in the report are built from the address you saved.
 - To show what was fixed since last time, a small file next to the reports keeps each flagged item's
   Bitwarden id and the reason it was flagged. It holds no name, site, username or password.
@@ -179,14 +180,19 @@ A plan listing every group (names and counts, never a password) is written to
   runner for every push.
 - **A release is a tag.** `bw-health.sh` names its `VERSION`, fetches its files from the tag `vVERSION`,
   and uses each only if it matches the SHA-256 written in `pinned_sha256`. Nothing is fetched from `main`.
-- **Cutting a release:**
-  1. Raise `VERSION` in `bw-health.sh` and the version in this README's paste lines.
-  2. Run `bash tests/run.sh`. If a fetched file changed, it fails and prints the checksum line to paste
-     into `pinned_sha256`. Run it again until it passes.
-  3. Merge to `main`, then tag that merge commit and push the tag: `git tag vX.Y.Z <commit>` and
-     `git push origin vX.Y.Z`. Until the tag is pushed, a paste line that still points at `main` cannot
-     fetch its files, so push it straight away.
-  4. A tagged version never changes: once `vX.Y.Z` exists, the tests fail if `bw-health.sh` or a fetched
+- **Cutting a release.** The tag is pushed before `main` moves, and `main` then becomes that same
+  commit, so no paste line ever points at a version whose tag does not exist yet:
+  1. On the release branch, raise `VERSION` in `bw-health.sh` and the version in this README's paste
+     lines. Run `bash tests/run.sh`: if a fetched file changed, it fails and prints the checksum line to
+     paste into `pinned_sha256`. Run it again until it passes.
+  2. Rebase the release branch onto the current `main` and run `bash tests/run.sh` on that exact commit.
+  3. Tag that commit, `git tag vX.Y.Z <commit>`, and check the tag before it leaves the Mac: each line of
+     `git show vX.Y.Z:bw-health.sh | grep -A5 '^pinned_sha256'` must equal `git show vX.Y.Z:<file> | shasum -a 256`.
+  4. Push the tag: `git push origin vX.Y.Z`.
+  5. Fast-forward `main` to the tagged commit and push it: `git merge --ff-only vX.Y.Z`, then
+     `git push origin main`. Never squash, and never use a merge that makes a new commit: `main` must be
+     the tagged commit itself.
+  6. A tagged version never changes: once `vX.Y.Z` exists, the tests fail if `bw-health.sh` or a fetched
      file differs from it without a new `VERSION`.
 - **Trying a branch before it is released:** run `bash bw-health.sh` from a checkout. Run as a file with
   its four files beside it, it uses those and says so; they are checked against the same checksums, so

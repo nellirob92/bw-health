@@ -20,9 +20,10 @@ Work that was considered and left out, with the reason.
   `v*` tags; a ruleset that blocks deleting or moving them is planned, not applied.
 - **Item-name tags for the fix order.** A folder named in `fix_order.txt` sets a login's tier; a tag in
   an item's own name does not.
-- **Two-step matching across unrelated addresses of one site.** A login matches the 2FA Directory list
-  when its address is on the list, under a listed address, above one, or shares a domain named in
-  `fix_order.txt`. A site with two unlisted, unrelated sign-in addresses is missed.
+- **Two-step matching across unrelated addresses of one site.** A login "supports two-step" when its
+  address is on the 2FA Directory list, and "likely supports" it when the address is under a listed one,
+  above one, or shares a domain named in `fix_order.txt`. A site whose sign-in address is none of those
+  (a sibling of the listed address, with no domain in `fix_order.txt`) is not flagged.
 - **Progress after a profile is signed in to a different account.** The progress file is compared by
   item id. Signing a profile out and in again as someone else would count every earlier item as fixed.
 - **A check that the links in the report open the right pages** (the web vault's item, account and

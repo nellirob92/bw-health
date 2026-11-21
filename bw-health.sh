@@ -56,10 +56,10 @@ FILES="bw_report.py bw_import_diff.py bw_dedupe.py fix_order.txt"
 # SHA-256 of each fetched file. `bash tests/run.sh` fails, and prints the right value, when one is stale.
 pinned_sha256() { # <file name>
   case "$1" in
-    bw_report.py)      echo "74af9baa0135510e9f7fe5f052349d0e6010eed7d6bb493f9589838d7c401b18" ;;
+    bw_report.py)      echo "838995eee820adf6284e142b47fafde28107b6b6c651aea9a67bd8384e2ca7fe" ;;
     bw_import_diff.py) echo "5c01fa14640d0de6e844cde52944cbef8d116ed91fb2ce3f064430ff17bdf37c" ;;
     bw_dedupe.py)      echo "8d55188435ddfd668a63059c365b33a8bca5842343c886713c6f88cc09623eea" ;;
-    fix_order.txt)     echo "134c01685284c4884afffeb5c36c7ee0c92872de4775ee0c593b8f45f76bcda0" ;;
+    fix_order.txt)     echo "2b5f17f989ff070ada47bcf0b1ccb71e888b94143ae2cdd1a7b68d8d821525a5" ;;
     *) fail "no checksum is written in bw-health.sh for $1" ;;
   esac
 }
@@ -443,7 +443,7 @@ mkdir -p "$REPORTS_DIR"
 chmod 700 "$REPORTS_DIR"
 report="$REPORTS_DIR/$REPORT_NAME $(date '+%Y-%m-%d %H%M%S').html"
 "$UV" run --quiet "$APP_DIR/bw_report.py" --html --out "$report" --state "$REPORTS_DIR/progress.json" \
-  --twofa-cache "$APP_DIR/2fa-directory.json" || fail "report failed"
+  --twofa-cache "$PROFILE_DIR/2fa-directory.json" || fail "report failed"
 chmod 600 "$report"
 open "$report"
 prune_reports

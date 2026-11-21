@@ -56,6 +56,9 @@ LAST_TIER = 5
 EXPOSED, REUSED, WEAK, DUPLICATE, TWOFA, AUTOFILL, OLD, NOTES = (
     "exposed", "reused", "weak", "duplicate", "two-step", "autofill", "old", "notes")
 
+# How a login was matched to the 2FA Directory list: its own address is listed, or only a related one is.
+SUPPORTS, LIKELY = "supports two-step", "likely supports two-step"
+
 # Only values of these shapes are put into a link.
 SAFE_HOST = re.compile(r"[a-z0-9-]+(\.[a-z0-9-]+)+")
 SAFE_ID = re.compile(r"[A-Za-z0-9-]{1,64}")
@@ -122,8 +125,17 @@ class TwoFa:
     offering: set[str]
     under: set[str]  # each offering domain and its parents, so a login saved on the parent site still matches
 
-    def offers(self, site: str) -> bool:
-        return site in self.under or any(s in self.offering for s in suffixes(site))
+    def related(self, name: str) -> bool:
+        """Is this address above a listed one, or at or below one?"""
+        return name in self.under or any(s in self.offering for s in suffixes(name))
+
+    def match(self, host: str, site: str) -> str | None:
+        """How an address ties to the list. SUPPORTS: the address itself is listed. LIKELY: only a related address
+        is, one above or below it, or another address of the same site (site is its fix_order.txt domain). None:
+        nothing ties it to the list, and it is not flagged."""
+        if host.lower() in self.offering:
+            return SUPPORTS
+        return LIKELY if self.related(host.lower()) or self.related(site) else None
 
 
 def parse_twofa(raw: str) -> TwoFa:
@@ -153,7 +165,7 @@ def load_twofa(file: str | None, cache: str | None) -> tuple[TwoFa | None, str]:
             tmp.replace(cached)
         return parsed, ""
     except (OSError, ValueError) as err:  # no network, a refused download, or a list that is not what it was
-        print(f"The two-step check was skipped: the list of sites could not be used ({err}).", file=sys.stderr)
+        print(f"The two-step check was not run: the list of sites could not be used ({err}).", file=sys.stderr)
         return None, "the list of sites could not be downloaded"
 
 
@@ -209,7 +221,7 @@ class Report:
     exposed: list[tuple[Login, int]] = field(default_factory=list)
     duplicates: dict[str, list[Login]] = field(default_factory=dict)
     hibp_checked: bool = False
-    twofa: list[Login] = field(default_factory=list)
+    twofa: list[tuple[Login, str]] = field(default_factory=list)   # (login, SUPPORTS or LIKELY)
     twofa_skipped: str = ""    # why the two-step check did not run, or "" when it did
     autofill: list[tuple[Login, str]] = field(default_factory=list)
     old: list[tuple[Login, datetime, str]] = field(default_factory=list)
@@ -222,7 +234,7 @@ class Report:
         for reason, logins in (
                 (EXPOSED, [l for l, _ in self.exposed]), (REUSED, [l for ls in self.reused.values() for l in ls]),
                 (WEAK, [l for l, _, _ in self.weak]), (DUPLICATE, [l for ls in self.duplicates.values() for l in ls]),
-                (TWOFA, self.twofa), (AUTOFILL, [l for l, _ in self.autofill]), (OLD, [l for l, _, _ in self.old])):
+                (TWOFA, [l for l, _ in self.twofa]), (AUTOFILL, [l for l, _ in self.autofill]), (OLD, [l for l, _, _ in self.old])):
             for l in logins:
                 out[l.item_id].add(reason)
         for hit in self.notes:
@@ -412,8 +424,10 @@ def build(items: list[dict], order: FixOrder, folders: dict[str, str], check_hib
     rep.duplicates = {k: ls for k, ls in by_account.items() if len(ls) > 1}
 
     for l in live:
-        if twofa and not l.has_totp and any(twofa.offers(order.site(h)) for h in l.hosts):
-            rep.twofa.append(l)
+        if twofa and not l.has_totp:
+            matches = {twofa.match(h, order.site(h)) for h in l.hosts} - {None}
+            if matches:
+                rep.twofa.append((l, SUPPORTS if SUPPORTS in matches else LIKELY))
         problem = autofill_problem(l)
         if problem:
             rep.autofill.append((l, problem))
@@ -512,7 +526,7 @@ def render(rep: Report, progress: Progress, vault_url: str, today: str) -> str:
          ["Duplicate entries (same site + username)", str(sum(len(v) for v in rep.duplicates.values()))],
          ["**Logins that need a new password**", f"**{len(at_risk)}**"],
          ["Sites that offer two-step login, no code saved here",
-          f"not checked ({rep.twofa_skipped})" if rep.twofa_skipped else str(len(rep.twofa))],
+          f"not checked this run ({rep.twofa_skipped})" if rep.twofa_skipped else str(len(rep.twofa))],
          ["AutoFill problems", str(len(rep.autofill))],
          ["Passwords unchanged for 3+ years", str(len(rep.old))],
          ["Notes that may hold a password", str(len(rep.notes))]],
@@ -576,14 +590,17 @@ def render(rep: Report, progress: Progress, vault_url: str, today: str) -> str:
 
     lines += ["## Two-step login", ""]
     if rep.twofa_skipped:
-        lines.append(f"Not checked this time: {rep.twofa_skipped}.")
+        lines.append(f"Not checked this run: {rep.twofa_skipped}. This does not mean none were found.")
     elif rep.twofa:
         lines += ["For each login below: this site offers two-step login; check it's on. No one-time code is saved in the "
                   "Bitwarden entry, and the entry cannot show whether two-step login is already on at the site (a text "
-                  "message or another app would not show here).", ""]
-        lines.append(md_table(["Priority", "Login", "Links"],
-                              [[TIER_NAMES[l.tier], marked(l.label, l.item_id), links(l)]
-                               for l in sorted(rep.twofa, key=lambda x: (x.tier, x.name.lower()))]))
+                  "message or another app would not show here).", "",
+                  f"\"{SUPPORTS.capitalize()}\" means the saved address itself is on the public list. "
+                  f"\"{LIKELY.capitalize()}\" means only a related address is: one above or below it, or another "
+                  "address of the same site.", ""]
+        lines.append(md_table(["Priority", "Login", "Match", "Links"],
+                              [[TIER_NAMES[l.tier], marked(l.label, l.item_id), how, links(l)]
+                               for l, how in sorted(rep.twofa, key=lambda x: (x[0].tier, x[0].name.lower()))]))
     else:
         lines.append("None.")
     if not rep.twofa_skipped:

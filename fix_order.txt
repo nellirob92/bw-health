@@ -7,6 +7,13 @@
 #   <tier> folder: <name>    every login kept in a Bitwarden folder with exactly this name
 #                            (capitals do not matter). A folder line wins over a domain line.
 #
+# The two-step login check uses the domain lines too. A login whose address sits under a domain
+# listed here is compared with the public 2FA Directory list as that whole site, so
+# accounts.google.com is compared as google.com. In the report a match made that way reads
+# "likely supports two-step"; only an address that is on the list itself reads
+# "supports two-step". Adding a domain here can therefore add "likely" matches for that
+# site's other addresses.
+#
 # Tiers:
 #   1  email, and Apple, Google and Microsoft accounts (they reset every other password)
 #   2  money: banks, cards, brokerages, payment apps, Amazon, PayPal, tax, government benefits

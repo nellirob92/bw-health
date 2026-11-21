@@ -115,18 +115,29 @@ pass "the fix order matches listed domains and folders only"
 
 # Two-step login: matched here against a saved copy of the list. A site counts when the list has it, an
 # address under it, or (through the fix order's domain) another address of the same site.
-expect "$R" '^\| Sites that offer two-step login, no code saved here \| 3 \|' "two-step login counts sites with no code saved"
+expect "$R" '^\| Sites that offer two-step login, no code saved here \| 4 \|' "two-step login counts sites with no code saved"
 expect "$R" "this site offers two-step login; check it's on" "the two-step wording does not claim to know whether it is on"
 section 'Two-step login' >"$WORK/twofa-section.md"
-expect "$WORK/twofa-section.md" '^\| 2 - money \| Chase \(a\) - secure.chase.com \|' "an address under a site on the list is flagged"
-expect "$WORK/twofa-section.md" '^\| 1 - email, Apple, Google, Microsoft \| Apple \(a@example.com\) - idmsa.apple.com \|' "another address of a listed site is flagged through the fix order's domain"
-expect "$WORK/twofa-section.md" '^\| 5 - everything else \| Parent site \(a\) - example.io \|' "a site whose sign-in address is on the list is flagged"
+expect "$WORK/twofa-section.md" '^\| 1 - email, Apple, Google, Microsoft \| Mail \(a@example.com\) - gmail.com \| supports two-step \|' "an address that is on the list itself reads: supports two-step"
+expect "$WORK/twofa-section.md" '^\| 2 - money \| Chase \(a\) - secure.chase.com \| likely supports two-step \|' "an address under a listed one reads: likely supports two-step"
+expect "$WORK/twofa-section.md" '^\| 1 - email, Apple, Google, Microsoft \| Apple \(a@example.com\) - idmsa.apple.com \| likely supports two-step \|' "another address of a site named in the fix order reads: likely"
+expect "$WORK/twofa-section.md" '^\| 5 - everything else \| Parent site \(a\) - example.io \| likely supports two-step \|' "an address above a listed one reads: likely"
+[ "$(grep -c '| supports two-step |' "$WORK/twofa-section.md")" = "1" ] && [ "$(grep -c '| likely supports two-step |' "$WORK/twofa-section.md")" = "3" ] || { cat "$WORK/twofa-section.md"; echo "FAIL exactly one match is exact and three are likely"; exit 1; }
+expect "$WORK/twofa-section.md" '"Supports two-step" means the saved address itself is on the public list' "the report explains the two labels"
+! grep -q 'Sibling\|Bank app' "$WORK/twofa-section.md" || { cat "$WORK/twofa-section.md"; echo "FAIL a site with no list entry and no shared domain was flagged"; exit 1; }
+pass "a site with no list entry and no shared domain is not flagged (other.example.io beside login.example.io; bank.example.com)"
 ! grep -q '| Google (a@\|Plain site\|Lookalike\|Webmail' "$WORK/twofa-section.md" || { cat "$WORK/twofa-section.md"; echo "FAIL a login with a code saved, a site with no two-step login, or an unrelated site was flagged"; exit 1; }
+grep -q 'accounts.google.com is compared as google.com' fix_order.txt && grep -q 'likely supports two-step' fix_order.txt || { echo "FAIL fix_order.txt must say how its domains feed the two-step check"; exit 1; }
 expect "$R" 'Data sourced from \[2FA Directory\]\(https://2fa.directory/\) by 2factorauth' "the list's source is credited, as its licence asks"
 health "$H" "$WORK/h-nolist.md" --twofa-file "$WORK/no-such-list.json" || { cat "$WORK/h-nolist.md.log"; echo "FAIL a missing two-step list stopped the report"; exit 1; }
-expect "$WORK/h-nolist.md" '^\| Sites that offer two-step login, no code saved here \| not checked \(the list of sites could not be downloaded\) \|' "a list that cannot be had shows as not checked, never as zero"
-expect "$WORK/h-nolist.md" '^Not checked this time: the list of sites could not be downloaded\.$' "the two-step section says it was not checked"
-expect "$WORK/h-nolist.md.log" 'The two-step check was skipped' "a skipped two-step check is said on the terminal too"
+not_checked() { # <report>: the two-step check must read "not checked this run", never a count and never "None."
+  grep -q '^| Sites that offer two-step login, no code saved here | not checked this run (the list of sites could not be downloaded) |$' "$1" \
+    && grep -q '^Not checked this run: the list of sites could not be downloaded\. This does not mean none were found\.$' "$1" \
+    && ! sed -n '/^## Two-step login/,/^## AutoFill/p' "$1" | grep -q '^None\.$\|^| Priority'
+}
+not_checked "$WORK/h-nolist.md" || { cat "$WORK/h-nolist.md"; echo "FAIL a list that cannot be had must read: not checked this run"; exit 1; }
+pass "a list that cannot be had reads: not checked this run, never none found"
+expect "$WORK/h-nolist.md.log" 'The two-step check was not run' "a two-step check that did not run is said on the terminal too"
 # The real download: the whole public list, kept for a day. A fresh copy is used as it is; a stale one is replaced.
 CACHE="$WORK/twofa-cache.json"
 health "$H" "$WORK/h-live.md" --twofa-cache "$CACHE" || { cat "$WORK/h-live.md.log"; echo "FAIL the report with the downloaded list"; exit 1; }
@@ -135,8 +146,16 @@ expect "$WORK/h-live.md" '^\| Sites that offer two-step login, no code saved her
 cp "$FX/twofa.json" "$CACHE"
 health "$H" "$WORK/h-cached.md" --twofa-cache "$CACHE"
 cmp -s "$FX/twofa.json" "$CACHE" || { echo "FAIL a copy of the list younger than a day was downloaded again"; exit 1; }
-expect "$WORK/h-cached.md" '^\| Sites that offer two-step login, no code saved here \| 3 \|' "a fresh kept copy of the list is the one used"
+expect "$WORK/h-cached.md" '^\| Sites that offer two-step login, no code saved here \| 4 \|' "a fresh kept copy of the list is the one used"
+# No network (every request is sent to a port nothing listens on): a copy older than a day is not trusted,
+# and with no copy at all the check cannot run. Both read "not checked this run".
+offline() { ( unset no_proxy NO_PROXY; export https_proxy=http://127.0.0.1:9 HTTPS_PROXY=http://127.0.0.1:9; "$@" ); }
 touch -t "$(date -v-2d +%Y%m%d%H%M)" "$CACHE"
+offline health "$H" "$WORK/h-stale-offline.md" --twofa-cache "$CACHE" || { cat "$WORK/h-stale-offline.md.log"; echo "FAIL a failed download stopped the report"; exit 1; }
+not_checked "$WORK/h-stale-offline.md" && cmp -s "$FX/twofa.json" "$CACHE" || { cat "$WORK/h-stale-offline.md.log"; echo "FAIL a list older than a day with no network must read: not checked this run"; exit 1; }
+offline health "$H" "$WORK/h-none-offline.md" --twofa-cache "$WORK/no-cache-yet.json" || { echo "FAIL a failed download stopped the report"; exit 1; }
+not_checked "$WORK/h-none-offline.md" && [ ! -e "$WORK/no-cache-yet.json" ] || { echo "FAIL a failed download with no kept copy must read: not checked this run"; exit 1; }
+pass "a failed download, or a stale copy with no network, reads: not checked this run"
 health "$H" "$WORK/h-stale.md" --twofa-cache "$CACHE"
 ! cmp -s "$FX/twofa.json" "$CACHE" || { echo "FAIL a copy of the list older than a day was not replaced"; exit 1; }
 pass "two-step login is matched locally against the whole list, kept for a day"
@@ -172,18 +191,18 @@ expect "$WORK/h-oddvault.md" 'In the Bitwarden web vault, open Settings, then Se
 pass "links come from the saved address, the item id and the server only"
 
 # Progress: the file holds item ids and reason names, nothing else, and the next run compares against it.
-expect "$R" '^\*\*First check-up of this vault on this Mac: 13 flagged\.\*\*' "a first run says so and counts what is flagged"
+expect "$R" '^\*\*First check-up of this vault on this Mac: 14 flagged\.\*\*' "a first run says so and counts what is flagged"
 P="$WORK/progress.json"
 [ "$(stat -f %Lp "$P")" = "600" ] || { echo "FAIL the progress file is not owner-only"; exit 1; }
-[ "$(/usr/bin/jq -c --slurpfile vault "$H" '[(keys == ["checks","date","flagged","version"]), ((.flagged | keys) - ($vault[0] | map(.id)) == []), ([.flagged[][], .checks[]] | all(IN("exposed","reused","weak","duplicate","two-step","autofill","old","notes"))), (.flagged | length == 13), (.flagged.h5 == ["weak"]), (.checks | index("exposed") == null)]' "$P")" = "[true,true,true,true,true,true]" ] || { cat "$P"; echo "FAIL the progress file must hold item ids and reason names only, and only the checks that ran"; exit 1; }
+[ "$(/usr/bin/jq -c --slurpfile vault "$H" '[(keys == ["checks","date","flagged","version"]), ((.flagged | keys) - ($vault[0] | map(.id)) == []), ([.flagged[][], .checks[]] | all(IN("exposed","reused","weak","duplicate","two-step","autofill","old","notes"))), (.flagged | length == 14), (.flagged.h5 == ["weak"]), (.checks | index("exposed") == null)]' "$P")" = "[true,true,true,true,true,true]" ] || { cat "$P"; echo "FAIL the progress file must hold item ids and reason names only, and only the checks that ran"; exit 1; }
 ! grep -qi 'forum\|example\|chase\|password1\|Hunter2\|jsmith\|Zr8' "$P" || { echo "FAIL a name, site, username or password reached the progress file"; exit 1; }
 # Second run: Forum's password and the Wifi note are fixed; Bank app loses its https:// address.
 /usr/bin/jq 'map(if .id == "h5" then .login.password = "Zr8#kLm2$Qv9xT4w-05" elif .id == "h9" then .notes = "nothing here" elif .id == "h8" then .login.uris = [{"uri":"http://bank.example.com"}] else . end)' "$H" >"$WORK/health2.json"
 health "$WORK/health2.json" "$WORK/h2.md" --twofa-file "$FX/twofa.json" --state "$P"
-expect "$WORK/h2.md" '^\*\*2 fixed since [0-9]{4}-[0-9]{2}-[0-9]{2}, 12 left\.\*\* 1 new since then, marked NEW\.$' "the next run counts what was fixed, what is left and what is new"
+expect "$WORK/h2.md" '^\*\*2 fixed since [0-9]{4}-[0-9]{2}-[0-9]{2}, 13 left\.\*\* 1 new since then, marked NEW\.$' "the next run counts what was fixed, what is left and what is new"
 expect "$WORK/h2.md" '^\| Bank app \(a\) - bank.example.com \*\*NEW\*\* \| only an http:// address saved \|' "a newly flagged login is marked NEW"
 [ "$(grep -c 'NEW\*\*' "$WORK/h2.md")" = "1" ] || { grep 'NEW' "$WORK/h2.md"; echo "FAIL a login flagged before was marked NEW"; exit 1; }
-# Third run without the two-step check: the three logins only it flags are neither fixed nor new.
+# Third run without the two-step check: the four logins only it flags are neither fixed nor new.
 health "$WORK/health2.json" "$WORK/h3.md" --no-twofa --state "$P"
 expect "$WORK/h3.md" '^\*\*0 fixed since [0-9]{4}-[0-9]{2}-[0-9]{2}, 9 left\.\*\*$' "a check that did not run is not counted as fixed"
 echo '{"flagged": []}' >"$WORK/bad-progress.json"
@@ -762,8 +781,8 @@ expect "$(newest_report "$MOM")" '<strong>First check-up of this vault on this M
 [ "$(stat -f %Lp "$MOM/Reports")$(stat -f %Lp "$(newest_report "$MOM")")$(stat -f %Lp "$MOM/Reports/progress.json")" = "700600600" ] || { echo "FAIL the Reports folder, the report and the progress file must be owner-only"; exit 1; }
 [ "$(tail -1 "$WORK/mu1.log")" = "==> Done. The report is open in your browser. It is kept in $MOM/Reports, not on the Desktop. Your vault is locked again." ] || { tail -2 "$WORK/mu1.log"; echo "FAIL the closing line must say where the report is kept"; exit 1; }
 [ ! -e "$MU_APP/data" ] && [ ! -e "$MU_APP/Bitwarden Import" ] && [ ! -e "$MU_APP/Reports" ] && [ -z "$(ls -A "$MU_HOME/Desktop")" ] || { echo "FAIL a profile run wrote to the shared sign-in, import folder or reports, or to the Desktop"; exit 1; }
-[ "$(/usr/bin/jq 'type == "object" and length > 1000' "$MU_APP/2fa-directory.json")" = "true" ] || { echo "FAIL the two-step list was not kept in the shared folder"; exit 1; }
-LIST_STAMP="$(stat -f '%m %i' "$MU_APP/2fa-directory.json")"
+[ "$(/usr/bin/jq 'type == "object" and length > 1000' "$MOM/2fa-directory.json")" = "true" ] && [ ! -e "$MU_APP/2fa-directory.json" ] || { echo "FAIL the two-step list must be kept in the person's own folder, nowhere shared"; exit 1; }
+LIST_STAMP="$(stat -f '%m %i' "$MOM/2fa-directory.json")"
 pass "a profile run signs in to its own folder and takes only the export typed for it"
 
 # dad, straight after: his own sign-in, his own folders, and nothing of mom's is read or changed.
@@ -781,7 +800,7 @@ grep -q 'library.org' "$DAD/Bitwarden Import/new-for-bitwarden.csv" && ! grep -q
 expect "$(newest_report "$DAD")" '<td>Logins with a password</td><td>1</td>' "dad's report is his vault, in his own Reports folder"
 [ "$(snapshot "$MOM")" = "$MOM_BEFORE" ] || { echo "FAIL dad's run changed mom's folder, reports or progress"; exit 1; }
 grep -qxF "$(newest_report "$DAD")" "$MU_OPENLOG" && grep -qxF "$DAD/Bitwarden Import" "$MU_OPENLOG" && ! grep -q 'mom' "$MU_OPENLOG" || { cat "$MU_OPENLOG"; echo "FAIL dad's run must open his report and his import folder only"; exit 1; }
-[ "$(stat -f '%m %i' "$MU_APP/2fa-directory.json")" = "$LIST_STAMP" ] || { echo "FAIL the two-step list was downloaded again within a day"; exit 1; }
+[ -f "$DAD/2fa-directory.json" ] || { echo "FAIL dad's copy of the two-step list must be in his own folder"; exit 1; }
 pass "two profiles back to back keep separate sign-ins, import folders and reports"
 
 # mom again: her profile is still signed in, so this is an unlock. --logout-after with a bw that cannot
@@ -804,6 +823,7 @@ expect "$(newest_report "$MOM")" '<strong>0 fixed since [0-9-]+, [0-9]+ left\.</
 expect "$WORK/mu3.log" "Removed 2 older report\(s\) from $MOM/Reports. The newest 10 are kept" "older reports are removed and counted"
 [ "$(ls "$MOM/Reports"/*.html | wc -l | tr -d ' ')" = "10" ] && [ ! -e "$MOM/Reports/Bitwarden Report - mom 2020-01-02 000000.html" ] && [ -e "$MOM/Reports/Bitwarden Report - mom 2020-01-03 000000.html" ] || { ls "$MOM/Reports"; echo "FAIL the newest 10 reports must be kept and the oldest removed"; exit 1; }
 [ -f "$MOM/Reports/my notes.txt" ] && [ -f "$MOM/Reports/progress.json" ] && [ "$(snapshot "$DAD")" = "$DAD_BEFORE" ] || { echo "FAIL clearing old reports touched something that is not one of this person's reports"; exit 1; }
+[ "$(stat -f '%m %i' "$MOM/2fa-directory.json")" = "$LIST_STAMP" ] || { echo "FAIL mom's copy of the two-step list was downloaded again within a day"; exit 1; }
 expect "$WORK/mu3.log" "An older report, 'Bitwarden Report - mom.html', is still on your Desktop" "a Desktop report from an earlier version is pointed out"
 [ -f "$MU_HOME/Desktop/Bitwarden Report - mom.html" ] || { echo "FAIL the old Desktop report was removed without being asked"; exit 1; }
 expect "$WORK/mu3.log" 'Profile mom: Bitwarden could NOT be signed out on this Mac' "a failed sign-out after a finished run is an error"
