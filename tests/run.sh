@@ -252,6 +252,9 @@ odd_links="$(grep -o 'href="[^"]*"' "$DH" | grep -vE '^href="(https://[a-z0-9.-]
 [ -z "$odd_links" ] || { echo "$odd_links"; echo "FAIL a link outside the shapes the report builds"; exit 1; }
 [ "$(grep -o '<a ' "$DH" | wc -l)" = "$(grep -o 'target="_blank" rel="noopener noreferrer"' "$DH" | wc -l)" ] || { echo "FAIL a link does not open in a new tab with noopener noreferrer"; exit 1; }
 expect "$DT" '^Click a site to change its password \(if you land on the home page, look under account settings\)\. Click the account to open it in Bitwarden\.$' "one line above the tables says what the links do"
+/usr/bin/jq 'map(if .id == "d2" then .id = "d2\" onclick=\"alert(1)" else . end)' "$D" >"$WORK/oddid.json"
+uv run --quiet bw_report.py --input "$WORK/oddid.json" --no-hibp --no-twofa --out "$WORK/oddid.html" >/dev/null
+! grep -q 'onclick' "$WORK/oddid.html" || { echo "FAIL an item id that is not a plain id was put in a link or a done tick"; exit 1; }
 pass "vault text is escaped and can never form a link; every link is one the report builds"
 
 expect "$DT" '^\| bigbank.test \| member \| 6 \| Yes \|$' "six copies with one password are safe to merge"

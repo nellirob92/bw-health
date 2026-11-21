@@ -1036,7 +1036,8 @@ def render_summary(rep: Report, today: str, user: str) -> str:
 # --- the page ---------------------------------------------------------------------------------------------
 
 TOOLS = ('<div id="tools" class="tools" hidden><label>Filter <input id="filter" type="search" placeholder="site or account"></label>'
-         '<label><input id="hide-done" type="checkbox"> Hide done</label></div>')
+         '<label><input id="hide-done" type="checkbox"> Hide done</label>'
+         '<span id="no-store" class="muted" hidden>This browser will not remember the done ticks once the page is closed.</span></div>')
 
 STYLE = """
 :root{--bg:#fbfbfa;--card:#fff;--ink:#1b1b1b;--muted:#5d5d5d;--line:#d9d9d6;--track:#e6e6e3;
@@ -1107,8 +1108,9 @@ a.v .i{display:none}main{padding:0}}
 SCRIPT = """
 (function(){
   var KEY='bw-health-done', done={};
-  try{ done=JSON.parse(localStorage.getItem(KEY)||'{}')||{}; }catch(e){ done={}; }
-  function save(){ try{ localStorage.setItem(KEY, JSON.stringify(done)); }catch(e){} }
+  function unkept(){ document.getElementById('no-store').hidden=false; }  // storage blocked: say so, keep ticks for this view
+  try{ done=JSON.parse(localStorage.getItem(KEY)||'{}')||{}; }catch(e){ unkept(); }
+  function save(){ try{ localStorage.setItem(KEY, JSON.stringify(done)); }catch(e){ unkept(); } }
   var tools=document.getElementById('tools'), filter=document.getElementById('filter'), hide=document.getElementById('hide-done');
   tools.hidden=false;
   var rows=[].slice.call(document.querySelectorAll('tr[data-ids]'));
