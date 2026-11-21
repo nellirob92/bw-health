@@ -596,7 +596,7 @@ expect "$WORK/mu1.log" '^  3  Old Passwords.csv  \(chrome, saved [0-9-]+ [0-9:]+
 expect "$WORK/mu1.log" "Moved Google Passwords.csv to Bitwarden Import/chrome-passwords-$TODAY.csv" "the chosen export is moved"
 expect "$WORK/mu1.log" '2 other password export file\(s\) are still in Downloads, untouched' "the run says what it left in Downloads"
 [ "$(LC_ALL=C ls "$MU_DL" | tr '\n' '|')" = "Old Passwords.csv|Passwords.csv|other.csv|" ] || { ls "$MU_DL"; echo "FAIL only the chosen export may leave Downloads"; exit 1; }
-[ "$(ls "$MOM/Bitwarden Import" | tr '\n' '|')" = "chrome-passwords-$TODAY.csv|conflicts.md|new-for-bitwarden.csv|" ] || { ls "$MOM/Bitwarden Import"; echo "FAIL mom's import folder must hold her export and its diff, nothing else"; exit 1; }
+[ "$(ls "$MOM/Bitwarden Import" | tr '\n' '|')" = "chrome-passwords-$TODAY.csv|conflicts.md|new-for-bitwarden.csv|" ] || { echo "FAIL mom's import folder must hold her export and its diff, nothing else"; ls "$MOM/Bitwarden Import" || true; exit 1; }
 grep -q 'spotify.com' "$MOM/Bitwarden Import/new-for-bitwarden.csv" && ! grep -q 'library.org' "$MOM/Bitwarden Import/new-for-bitwarden.csv" || { echo "FAIL mom's import file must come from her export only"; exit 1; }
 expect "$WORK/mu1.log" "These files are mom's. Import them only into the vault of mom@example.com" "the import step names the vault the files are for"
 expect "$MU_HOME/Desktop/Bitwarden Report - mom.html" '<td>Logins with a password</td><td>5</td>' "mom's report is her vault, under her name"
@@ -614,7 +614,7 @@ expect "$WORK/mu2.log" 'Profile dad: this run uses the vault of dad@example.com'
 bw_calls_since "$CALLS" | grep -qx 'profiles/dad/data login --raw' || { echo "FAIL dad did not sign in to his own data folder"; exit 1; }
 ! bw_calls_since "$CALLS" | grep -qv '^profiles/dad/data ' || { bw_calls_since "$CALLS"; echo "FAIL dad's run called bw on another data folder"; exit 1; }
 expect "$WORK/mu2.log" '^  1  Passwords.csv  \(apple, saved' "the export mom left is offered to dad"
-[ "$(ls "$DAD/Bitwarden Import" | tr '\n' '|')" = "apple-passwords-$TODAY.csv|conflicts.md|new-for-bitwarden.csv|" ] || { ls "$DAD/Bitwarden Import"; echo "FAIL dad's import folder must hold his export and its diff"; exit 1; }
+[ "$(ls "$DAD/Bitwarden Import" | tr '\n' '|')" = "apple-passwords-$TODAY.csv|conflicts.md|new-for-bitwarden.csv|" ] || { echo "FAIL dad's import folder must hold his export and its diff"; ls "$DAD/Bitwarden Import" || true; exit 1; }
 grep -q 'library.org' "$DAD/Bitwarden Import/new-for-bitwarden.csv" && ! grep -q 'spotify.com' "$DAD/Bitwarden Import/new-for-bitwarden.csv" || { echo "FAIL dad's import file must come from his export only"; exit 1; }
 expect "$MU_HOME/Desktop/Bitwarden Report - dad.html" '<td>Logins with a password</td><td>1</td>' "dad's report is his vault, under his name"
 [ "$(snapshot "$MOM")" = "$MOM_BEFORE" ] && cmp -s "$MU_HOME/Desktop/Bitwarden Report - mom.html" "$WORK/mom-report.html" || { echo "FAIL dad's run changed mom's folder or report"; exit 1; }
