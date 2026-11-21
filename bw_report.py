@@ -606,7 +606,7 @@ SHAPES = {
     "ok": '<path d="M1 5.2 4 8l5-6.5" fill="none" stroke="currentColor" stroke-width="1.8"/>',
     "tidy": '<rect x="1" y="1" width="8" height="8" fill="currentColor"/>',
     "arrow": '<path d="M2.5 7.5 7.5 2.5M3.5 2.5h4v4" fill="none" stroke="currentColor" stroke-width="1.3"/>',
-    "key": '<circle cx="3.2" cy="6.8" r="2.3" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M4.9 5.1 9.5.5M7.6 2.4l1.4 1.4" fill="none" stroke="currentColor" stroke-width="1.3"/>',
+    "key": '<circle cx="2.4" cy="4" r="1.8" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M4.2 4H9.6M7.4 4v2.6M9 4v2" fill="none" stroke="currentColor" stroke-width="1.2"/>',
 }
 
 
