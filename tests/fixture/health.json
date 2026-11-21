@@ -6,16 +6,17 @@
   {"id":"h5","type":1,"name":"Forum","folderId":"fm","deletedDate":null,"login":{"username":"a","password":"password1","totp":null,"uris":[{"uri":"https://forum.example.org"}]}},
   {"id":"h6","type":1,"name":"Router","folderId":null,"deletedDate":null,"login":{"username":"admin","password":"Zr8#kLm2$Qv9xT4w-06","totp":null,"uris":[{"uri":"http://router.example.lan/login"}]}},
   {"id":"h7","type":1,"name":"Garage code","folderId":null,"deletedDate":null,"login":{"username":"","password":"Zr8#kLm2$Qv9xT4w-07","totp":null,"uris":[]}},
-  {"id":"h8","type":1,"name":"Bank app","folderId":null,"deletedDate":null,"login":{"username":"a","password":"Zr8#kLm2$Qv9xT4w-08","totp":null,"uris":[{"uri":"http://bank.example.com"},{"uri":"https://bank.example.com"}]}},
+  {"id":"h8","type":1,"name":"Bank app","folderId":null,"deletedDate":null,"login":{"username":"bank","password":"Zr8#kLm2$Qv9xT4w-08","totp":null,"uris":[{"uri":"http://bank.example.com"},{"uri":"https://bank.example.com"}]}},
   {"id":"h9","type":2,"name":"Wifi details","folderId":null,"deletedDate":null,"notes":"network: HomeNet\npassword: Hunter2-note-secret\n"},
   {"id":"h10","type":1,"name":"Old forum","folderId":null,"deletedDate":null,"notes":"backup login\njsmith:Tr0ub4dor-note-pair","login":{"username":"jsmith","password":"Zr8#kLm2$Qv9xT4w-10","totp":null,"uris":[{"uri":"https://oldforum.example.net"}]}},
   {"id":"h11","type":2,"name":"Shopping list","folderId":null,"deletedDate":null,"notes":"milk, eggs\nremember: call at 12:30\nhttps://shop.example.com/list"},
   {"id":"h12","type":1,"name":"Apple","folderId":null,"deletedDate":null,"login":{"username":"a@example.com","password":"Zr8#kLm2$Qv9xT4w-12","totp":null,"uris":[{"uri":"https://idmsa.apple.com"}]}},
   {"id":"h13","type":1,"name":"Parent site","folderId":null,"deletedDate":null,"login":{"username":"a","password":"Zr8#kLm2$Qv9xT4w-13","totp":null,"uris":[{"uri":"https://example.io"}]}},
-  {"id":"h14","type":1,"name":"Plain site","folderId":null,"deletedDate":null,"login":{"username":"a","password":"Zr8#kLm2$Qv9xT4w-14","totp":null,"uris":[{"uri":"https://plain.example.com"}]}},
-  {"id":"h15","type":1,"name":"Lookalike","folderId":null,"deletedDate":null,"login":{"username":"a","password":"qwerty123","totp":null,"uris":[{"uri":"https://gmail.example.com"}]}},
+  {"id":"h14","type":1,"name":"Plain site","folderId":null,"deletedDate":null,"login":{"username":"plain","password":"Zr8#kLm2$Qv9xT4w-14","totp":null,"uris":[{"uri":"https://plain.example.com"}]}},
+  {"id":"h15","type":1,"name":"Lookalike","folderId":null,"deletedDate":null,"login":{"username":"look","password":"qwerty123","totp":null,"uris":[{"uri":"https://gmail.example.com"}]}},
   {"id":"h16","type":1,"name":"Trashed","folderId":null,"deletedDate":"2026-01-01T00:00:00Z","notes":"password: Trashed-note-secret","login":{"username":"a","password":"Zr8#kLm2$Qv9xT4w-16","totp":null,"uris":[]}},
-  {"id":"h17","type":1,"name":"Click [here](https://evil.example/x)","folderId":null,"deletedDate":null,"login":{"username":"a","password":"letmein","totp":null,"uris":[{"uri":"https://linky.example.com"}]}},
-  {"id":"h18","type":1,"name":"Sibling","folderId":null,"deletedDate":null,"login":{"username":"a","password":"Zr8#kLm2$Qv9xT4w-18","totp":null,"uris":[{"uri":"https://other.example.io"}]}},
-  {"id":"h19","type":1,"name":"Mail","folderId":null,"deletedDate":null,"login":{"username":"a@example.com","password":"Zr8#kLm2$Qv9xT4w-19","totp":null,"uris":[{"uri":"https://www.gmail.com/"}]}}
+  {"id":"h17","type":1,"name":"Click [here](https://evil.example/x)","folderId":null,"deletedDate":null,"login":{"username":"link","password":"letmein","totp":null,"uris":[{"uri":"https://linky.example.com"}]}},
+  {"id":"h18","type":1,"name":"Sibling","folderId":null,"deletedDate":null,"login":{"username":"sib","password":"Zr8#kLm2$Qv9xT4w-18","totp":null,"uris":[{"uri":"https://other.example.io"}]}},
+  {"id":"h19","type":1,"name":"Mail","folderId":null,"deletedDate":null,"login":{"username":"a@example.com","password":"Zr8#kLm2$Qv9xT4w-19","totp":null,"uris":[{"uri":"https://www.gmail.com/"}]}},
+  {"id":"h20","type":1,"name":"Old shop","folderId":null,"deletedDate":null,"login":{"username":"s","password":"Zr8#kLm2$Qv9xT4w-20","totp":null,"uris":[{"uri":"http://shop.oldsite.test/login"}]}}
 ]

@@ -4,12 +4,14 @@
 #   curl -fsSL <BASE_URL>/bw-health.sh | bash -s -- check              # install only
 #   curl -fsSL <BASE_URL>/bw-health.sh | bash -s -- dedupe exact|merge|pick # duplicate cleanup preview (read-only)
 #   curl -fsSL <BASE_URL>/bw-health.sh | bash -s -- dedupe merge apply [N]   # act on it, after a typed confirmation
+#   curl -fsSL <BASE_URL>/bw-health.sh | bash -s -- fixurls [apply [N]] # add https:// to http://-only logins (preview first)
+#   curl -fsSL <BASE_URL>/bw-health.sh | bash -s -- --summary-only     # only the shareable summary, no report
 #   curl -fsSL <BASE_URL>/bw-health.sh | bash -s -- logout             # sign out of Bitwarden on this Mac
 #   bash bw-health.sh exports                                          # stage Downloads exports only
 # Several people on one Mac account: add --user NAME to any line (own sign-in, folders and reports),
 # and --logout-after to sign that person out when the run ends.
 # <BASE_URL> is a release tag (see VERSION below), never main.
-# Only the dedupe step ever changes the vault; see README.md.
+# Only the dedupe and fixurls steps ever change the vault; see README.md.
 
 set -euo pipefail
 
@@ -18,7 +20,7 @@ fail() { printf '\nSomething went wrong: %s\nSend a screenshot of this window to
 
 # --- what to run, and for whom: checked before anything is installed or asked ------------------
 # --user NAME and --logout-after may sit anywhere on the line; the words left over are the step.
-PROFILE=""; PROFILE_GIVEN=0; LOGOUT_AFTER=0; words=()
+PROFILE=""; PROFILE_GIVEN=0; LOGOUT_AFTER=0; SUMMARY_ONLY=0; words=()
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --user)
@@ -26,6 +28,7 @@ while [ "$#" -gt 0 ]; do
       [ "$#" -ge 2 ] || fail "--user needs a name after it, for example: --user mom"
       PROFILE="$2"; PROFILE_GIVEN=1; shift 2 ;;
     --logout-after) LOGOUT_AFTER=1; shift ;;
+    --summary-only) SUMMARY_ONLY=1; shift ;;
     --*) fail "unknown option: $1" ;;
     *) words+=("$1"); shift ;;
   esac
@@ -34,6 +37,7 @@ set -- ${words[@]+"${words[@]}"}
 if [ "$PROFILE_GIVEN" = 1 ]; then
   [[ "$PROFILE" =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]] || fail "a --user name is 1 to 32 lowercase letters, digits or hyphens, and starts with a letter or digit (for example: mom)"
 fi
+[ "$SUMMARY_ONLY" = 0 ] || [ -z "${1:-}" ] || fail "--summary-only goes with the check-up itself, not with $1"
 case "${1:-}" in
   "") ;;
   check|exports|logout)
@@ -44,27 +48,35 @@ case "${1:-}" in
     case "${3:-}" in ""|apply) ;; *) fail "after the stage, the only word allowed is apply" ;; esac
     [ -z "${4:-}" ] || { [ "${3:-}" = apply ] && [[ "$4" =~ ^[1-9][0-9]*$ ]]; } || fail "a limit goes after apply and is a whole number, 1 or more"
     [ -z "${5:-}" ] || fail "nothing is allowed after the limit" ;;
-  *) fail "unknown step: $1. Leave it out for the check-up, or use check, exports, dedupe or logout." ;;
+  fixurls)
+    case "${2:-}" in ""|apply) ;; *) fail "after fixurls, the only word allowed is apply" ;; esac
+    [ -z "${3:-}" ] || { [ "${2:-}" = apply ] && [[ "$3" =~ ^[1-9][0-9]*$ ]]; } || fail "a limit goes after apply and is a whole number, 1 or more"
+    [ -z "${4:-}" ] || fail "nothing is allowed after the limit" ;;
+  *) fail "unknown step: $1. Leave it out for the check-up, or use check, exports, dedupe, fixurls or logout." ;;
 esac
 
 # A release is a tag. This script fetches its files from the tag of its own version and uses each
 # one only if it matches the checksum below, so no run depends on whatever is on main.
-VERSION="1.0.0"
+VERSION="1.1.0"
 RELEASE_URL="https://raw.githubusercontent.com/nellirob92/bw-health/v$VERSION"
 BASE_URL="${BW_HEALTH_BASE_URL:-$RELEASE_URL}"
-FILES="bw_report.py bw_import_diff.py bw_dedupe.py fix_order.txt"
+FILES="bw_report.py bw_import_diff.py bw_dedupe.py fix_order.txt public_suffix_list.dat"
 # SHA-256 of each fetched file. `bash tests/run.sh` fails, and prints the right value, when one is stale.
 pinned_sha256() { # <file name>
   case "$1" in
-    bw_report.py)      echo "838995eee820adf6284e142b47fafde28107b6b6c651aea9a67bd8384e2ca7fe" ;;
+    bw_report.py)      echo "f6833a4d17c881511db33d5398efa300abda339924c101f0029e54c4437c4415" ;;
     bw_import_diff.py) echo "5c01fa14640d0de6e844cde52944cbef8d116ed91fb2ce3f064430ff17bdf37c" ;;
-    bw_dedupe.py)      echo "8d55188435ddfd668a63059c365b33a8bca5842343c886713c6f88cc09623eea" ;;
+    bw_dedupe.py)      echo "b4f5da3a157e3c21f45fb40d5c00eb53f0a952b4fd8e4726c5706dcea6168c6a" ;;
     fix_order.txt)     echo "2b5f17f989ff070ada47bcf0b1ccb71e888b94143ae2cdd1a7b68d8d821525a5" ;;
+    public_suffix_list.dat) echo "3084c6ca4ac1dfb6e32461504b5dc494cc58ace521957e9e978ed0f870b2de94" ;;
     *) fail "no checksum is written in bw-health.sh for $1" ;;
   esac
 }
 APP_DIR="$HOME/Library/Application Support/bw-health"
 BIN_DIR="$APP_DIR/bin"
+# Each run fetches its scripts into a folder of its own and runs them from there, so two runs (two
+# versions, two profiles) close together can never swap each other's files. Removed when the run ends.
+RUN_DIR=""
 # A profile (--user NAME) has its own sign-in, import folder, dedupe plan and reports, so several
 # people can take turns on one Mac account. Without one, the shared folder is used.
 if [ -n "$PROFILE" ]; then
@@ -92,16 +104,16 @@ BW_CLI_SHA256_X64="39602a597ca63127c22ee3844546f3fe06079e4f67be7b9a7ea4e30ede872
 LOCAL_SRC=""
 if [ -z "${BW_HEALTH_BASE_URL:-}" ] && [ -n "${BASH_SOURCE[0]:-}" ]; then
   self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  beside=0
-  for f in $FILES; do [ ! -f "$self_dir/$f" ] || beside=$((beside + 1)); done
+  beside=0; wanted=0
+  for f in $FILES; do wanted=$((wanted + 1)); [ ! -f "$self_dir/$f" ] || beside=$((beside + 1)); done
   case "$beside" in
     0) ;;
-    4) LOCAL_SRC="$self_dir" ;;
-    *) fail "only some of this tool's files are beside bw-health.sh in $self_dir. Expected all four ($FILES), or none." ;;
+    "$wanted") LOCAL_SRC="$self_dir" ;;
+    *) fail "only some of this tool's files are beside bw-health.sh in $self_dir. Expected all of them ($FILES), or none." ;;
   esac
 fi
-fetch_file() { # <file name>: into APP_DIR, and only if it matches its pinned checksum
-  local f="$1" new="$APP_DIR/$1.new" want got
+fetch_file() { # <file name>: into this run's own folder, and only if it matches its pinned checksum
+  local f="$1" new="$RUN_DIR/$1.new" want got
   want="$(pinned_sha256 "$f")" || exit 1
   if [ -n "$LOCAL_SRC" ]; then
     cp "$LOCAL_SRC/$f" "$new" || fail "could not copy $f"
@@ -113,7 +125,7 @@ fetch_file() { # <file name>: into APP_DIR, and only if it matches its pinned ch
     rm -f "$new"
     fail "$f did not match the checksum written in bw-health.sh, so it was not used${LOCAL_SRC:+. If you changed it, update its checksum (see README, For maintainers)}"
   fi
-  mv "$new" "$APP_DIR/$f"
+  mv "$new" "$RUN_DIR/$f"
 }
 # Only the newest KEEP_REPORTS reports are kept, and only this person's Reports folder is touched.
 # The names carry the time, so the sorted list is oldest first.
@@ -312,10 +324,13 @@ account_email() {
   [ -n "$email" ] || fail "Bitwarden did not say which account profile $PROFILE is signed in as"
   printf '%s' "$email"
 }
-# Runs however the run ends once sign-in has succeeded: the vault is always locked, and the
-# account is signed out when --logout-after asked for it.
+# Runs however the run ends: this run's script folder is removed, and once sign-in has succeeded the
+# vault is always locked and the account signed out when --logout-after asked for it.
+SIGNED_IN=0
 finish() {
   local code=$?
+  [ -z "$RUN_DIR" ] || rm -rf "$RUN_DIR"
+  [ "$SIGNED_IN" = 1 ] || exit "$code"
   "$BW" lock >/dev/null 2>&1 || true
   if [ "$LOGOUT_AFTER" = 1 ]; then
     if sign_out; then
@@ -343,6 +358,8 @@ else
 fi
 export BITWARDENCLI_APPDATA_DIR="$PROFILE_DIR/data"
 mkdir -p "$BIN_DIR" "$BITWARDENCLI_APPDATA_DIR"
+RUN_DIR="$(mktemp -d "$APP_DIR/run.XXXXXX")" || fail "could not make a folder for this run's scripts"
+trap finish EXIT
 
 # --- 1. tools -------------------------------------------------------------------------------
 if [ ! -x "$UV" ]; then
@@ -416,7 +433,7 @@ else
 fi
 [ -n "$BW_SESSION" ] || fail "no session key came back from Bitwarden"
 export BW_SESSION
-trap finish EXIT
+SIGNED_IN=1
 if [ -n "$PROFILE" ]; then
   # Shown on every profile run, so a vault signed in under the wrong name is seen before it is used.
   ACCOUNT="$(account_email)"
@@ -433,27 +450,47 @@ if [ "${1:-}" = "dedupe" ]; then
   dedupe_args=("$2" --out-dir "$DEDUPE_DIR")
   [ "${3:-}" != "apply" ] || dedupe_args+=(--apply)
   [ -z "${4:-}" ] || dedupe_args+=(--limit "$4")
-  "$UV" run --quiet "$APP_DIR/bw_dedupe.py" "${dedupe_args[@]}" </dev/null || fail "duplicate cleanup failed"
+  "$UV" run --quiet "$RUN_DIR/bw_dedupe.py" "${dedupe_args[@]}" </dev/null || fail "duplicate cleanup failed"
+  exit 0
+fi
+
+# --- AutoFill fix (its own run: `bash -s -- fixurls [apply [N]]`) -----------------------------------
+if [ "${1:-}" = "fixurls" ]; then
+  say "AutoFill fix${2:+ ($2)}"
+  fix_args=(fixurls --out-dir "$DEDUPE_DIR")
+  [ "${2:-}" != "apply" ] || fix_args+=(--apply)
+  [ -z "${3:-}" ] || fix_args+=(--limit "$3")
+  "$UV" run --quiet "$RUN_DIR/bw_dedupe.py" "${fix_args[@]}" </dev/null || fail "AutoFill fix failed"
   exit 0
 fi
 
 # A dated report per run, in this person's own folder. The progress file beside it holds item ids
 # and the reasons they were flagged, so the next run can say what was fixed.
+# The summary beside them holds counts only, to share; each run replaces it.
 mkdir -p "$REPORTS_DIR"
 chmod 700 "$REPORTS_DIR"
 report="$REPORTS_DIR/$REPORT_NAME $(date '+%Y-%m-%d %H%M%S').html"
-"$UV" run --quiet "$APP_DIR/bw_report.py" --html --out "$report" --state "$REPORTS_DIR/progress.json" \
-  --twofa-cache "$PROFILE_DIR/2fa-directory.json" || fail "report failed"
-chmod 600 "$report"
+summary="$REPORTS_DIR/Bitwarden Summary${PROFILE:+ - $PROFILE}.html"
+report_args=(--summary "$summary" --twofa-cache "$PROFILE_DIR/2fa-directory.json" --paste-line "curl -fsSL $RELEASE_URL/bw-health.sh | bash -s --")
+[ -z "$PROFILE" ] || report_args+=(--user "$PROFILE")
+if [ "$SUMMARY_ONLY" = 1 ]; then
+  "$UV" run --quiet "$RUN_DIR/bw_report.py" --summary-only "${report_args[@]}" >/dev/null || fail "summary failed"
+  open "$summary"
+  say "${TAG}The summary to share is open in your browser: counts only, no site, username or password. It is kept in $summary"
+  exit 0
+fi
+"$UV" run --quiet "$RUN_DIR/bw_report.py" --out "$report" --state "$REPORTS_DIR/progress.json" "${report_args[@]}" >/dev/null \
+  || fail "report failed"
 open "$report"
 prune_reports
-say "This check only reads your vault. It never merges, deletes or changes anything. Cleaning up duplicates is a separate step you start yourself, and it shows you everything first."
+say "A summary to share with family (counts only: no site, username or password) is in $summary"
+say "This check only reads your vault. It never merges, deletes or changes anything. Cleaning up duplicates and adding https:// addresses are separate steps you start yourself, and they show you everything first."
 
 # --- 4. optional import diff --------------------------------------------------------------
 stage_exports
 if [ "${#STAGED[@]}" -gt 0 ]; then
   say "Comparing ${#STAGED[@]} export(s) with your vault"
-  "$UV" run --quiet "$APP_DIR/bw_import_diff.py" "${STAGED[@]}" --out-dir "$IMPORT_DIR" || fail "import diff failed"
+  "$UV" run --quiet "$RUN_DIR/bw_import_diff.py" "${STAGED[@]}" --out-dir "$IMPORT_DIR" || fail "import diff failed"
   open "$IMPORT_DIR"
   cat <<'EOT'
 

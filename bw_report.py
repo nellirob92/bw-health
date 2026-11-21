@@ -10,6 +10,11 @@ login where no code is saved; logins iPhone AutoFill will not match; passwords u
 and notes that look like they hold a password. Reads the vault with `bw list items` and
 `bw list folders` (read-only) and never prints a password or the text of a note.
 
+The report is one self-contained HTML page, grouped by site: one row per website and username,
+however many copies or addresses it has. A site is a registrable domain from the public suffix list
+(bw_dedupe.py reads it, and the duplicate cleanup uses the same groups). A second page, the summary,
+holds counts only, to share with family.
+
 Two network calls, and neither names a site, a username or a person: the breach check sends the
 first 5 characters of each password's SHA-1 to Have I Been Pwned, and the two-step check downloads
 the whole public 2FA Directory list and matches it here. Needs BW_SESSION from `bw unlock --raw`,
@@ -22,6 +27,7 @@ import argparse
 import hashlib
 import html
 import json
+import math
 import os
 import re
 import subprocess
@@ -37,6 +43,8 @@ from urllib.parse import urlparse
 
 from zxcvbn import zxcvbn
 
+import bw_dedupe as dd
+
 LOGIN_TYPE, NOTE_TYPE = 1, 2
 WEAK_MAX_SCORE = 2  # zxcvbn: 0-2 weak, 3 ok, 4 strong
 ZXCVBN_MAX_LENGTH = 72  # zxcvbn raises on longer input; a longer password is scored on its first 72 characters
@@ -47,14 +55,20 @@ USER_AGENT = "bw_report family vault check"
 DEFAULT_VAULT_URL = "https://vault.bitwarden.com"
 OLD_AFTER = timedelta(days=3 * 365)
 RECENTLY_ADDED = timedelta(days=30)
+FIX_FIRST = 10
 
-TIER_NAMES = {1: "1 - email, Apple, Google, Microsoft", 2: "2 - money", 3: "3 - phone, utilities, insurance, health",
-              4: "4 - gaming and social", 5: "5 - everything else"}
+TIER_NAMES = {1: "Email & main accounts", 2: "Money & shopping", 3: "Phone, utilities, insurance & health",
+              4: "Gaming & social", 5: "Everything else"}
 LAST_TIER = 5
 
 # The reasons an item can be flagged, as kept in the progress file.
 EXPOSED, REUSED, WEAK, DUPLICATE, TWOFA, AUTOFILL, OLD, NOTES = (
     "exposed", "reused", "weak", "duplicate", "two-step", "autofill", "old", "notes")
+# Worst first: a site's problems roll up to its worst, and the fix list is sorted by it.
+SEVERITY = [EXPOSED, REUSED, WEAK, OLD, DUPLICATE, TWOFA, AUTOFILL]
+NEEDS_NEW_PASSWORD = {EXPOSED, REUSED, WEAK}
+CHIP_WORDS = {EXPOSED: "Exposed", REUSED: "Reused", WEAK: "Weak", OLD: "Old", DUPLICATE: "Duplicate",
+              TWOFA: "Two-step", AUTOFILL: "AutoFill", "new": "NEW"}
 
 # How a login was matched to the 2FA Directory list: its own address is listed, or only a related one is.
 SUPPORTS, LIKELY = "supports two-step", "likely supports two-step"
@@ -63,6 +77,9 @@ SUPPORTS, LIKELY = "supports two-step", "likely supports two-step"
 SAFE_HOST = re.compile(r"[a-z0-9-]+(\.[a-z0-9-]+)+")
 SAFE_ID = re.compile(r"[A-Za-z0-9-]{1,64}")
 SAFE_VAULT_URL = re.compile(r"https?://[a-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9./-]*)?")
+SAFE_PASTE_LINE = re.compile(r"curl -fsSL https://raw\.githubusercontent\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/v[0-9]+\.[0-9]+\.[0-9]+"
+                             r"/bw-health\.sh \| bash -s --")
+SAFE_USER = re.compile(r"[a-z0-9][a-z0-9-]{0,31}")
 
 NOTE_KEYWORD = re.compile(
     r"\b(password|passwd|passphrase|passcode|pwd|pw|pin|security answer|secret answer)\b\s*[:=]\s*\S", re.IGNORECASE)
@@ -169,38 +186,25 @@ def load_twofa(file: str | None, cache: str | None) -> tuple[TwoFa | None, str]:
         return None, "the list of sites could not be downloaded"
 
 
-def plain(text: str) -> str:
-    """Vault text that is safe in a report line: it can never form a link."""
-    return text.replace("](", "] (")
-
-
 @dataclass
 class Login:
     item_id: str
     name: str
     username: str
-    host: str               # the first address's host: what the label and the site links use
+    host: str               # the first address's host, without www.: what the strength check is told
     hosts: list[str]
     uris: list[str]
+    site: str               # the site the login belongs to (bw_dedupe.site_of), "" with no address
+    key: str                # site + username, or the item alone when either is missing: one row of the report
+    secure: bool            # an https:// or bare address is saved, so a change-password link may be offered
     password: str
     in_trash: bool
     tier: int
     has_totp: bool
     changed: datetime | None  # when Bitwarden last saw the password change
     created: datetime | None
-
-    @property
-    def label(self) -> str:
-        who = f" ({self.username})" if self.username else ""
-        where = f" - {self.host}" if self.host and self.host not in self.name else ""
-        return plain(f"{self.name}{who}{where}")
-
-    @property
-    def account(self) -> str:
-        """Same site + username (case-insensitive) is one account; a login missing either stands alone."""
-        if self.host and self.username:
-            return f"{self.host}|{self.username.lower()}"
-        return f"item:{self.item_id}"
+    revised: str            # the item's last edit, as bw writes it
+    has_passkey: bool
 
 
 @dataclass
@@ -219,26 +223,30 @@ class Report:
     reused: dict[str, list[Login]] = field(default_factory=dict)   # key = sha1 of password
     weak: list[tuple[Login, int, str]] = field(default_factory=list)
     exposed: list[tuple[Login, int]] = field(default_factory=list)
-    duplicates: dict[str, list[Login]] = field(default_factory=dict)
+    breaches: dict[str, int] = field(default_factory=dict)          # sha1 -> times seen in breaches
+    dupes: list[dd.Group] = field(default_factory=list)             # the duplicate cleanup's own groups
+    safe_merge: int = 0                                             # of those, how many `dedupe merge` takes
     hibp_checked: bool = False
     twofa: list[tuple[Login, str]] = field(default_factory=list)   # (login, SUPPORTS or LIKELY)
     twofa_skipped: str = ""    # why the two-step check did not run, or "" when it did
     autofill: list[tuple[Login, str]] = field(default_factory=list)
+    fixable: set[str] = field(default_factory=set)                  # item ids `fixurls` would give an https:// address
     old: list[tuple[Login, datetime, str]] = field(default_factory=list)
     recently_added: int = 0
     notes: list[NoteHit] = field(default_factory=list)
+    logins: list[Login] = field(default_factory=list)               # live logins with a password
 
     def flags(self) -> dict[str, set[str]]:
         """Item id -> the reasons it is flagged. Ids and reason names only: this is all the progress file holds."""
         out: dict[str, set[str]] = defaultdict(set)
-        for reason, logins in (
-                (EXPOSED, [l for l, _ in self.exposed]), (REUSED, [l for ls in self.reused.values() for l in ls]),
-                (WEAK, [l for l, _, _ in self.weak]), (DUPLICATE, [l for ls in self.duplicates.values() for l in ls]),
-                (TWOFA, [l for l, _ in self.twofa]), (AUTOFILL, [l for l, _ in self.autofill]), (OLD, [l for l, _, _ in self.old])):
-            for l in logins:
-                out[l.item_id].add(reason)
-        for hit in self.notes:
-            out[hit.item_id].add(NOTES)
+        for reason, ids in (
+                (EXPOSED, [l.item_id for l, _ in self.exposed]), (REUSED, [l.item_id for ls in self.reused.values() for l in ls]),
+                (WEAK, [l.item_id for l, _, _ in self.weak]),
+                (DUPLICATE, [i["id"] for g in self.dupes for i in [g.keeper, *g.others]]),
+                (TWOFA, [l.item_id for l, _ in self.twofa]), (AUTOFILL, [l.item_id for l, _ in self.autofill]),
+                (OLD, [l.item_id for l, _, _ in self.old]), (NOTES, [hit.item_id for hit in self.notes])):
+            for item_id in ids:
+                out[item_id].add(reason)
         return dict(out)
 
     def checks(self) -> set[str]:
@@ -290,10 +298,6 @@ def load_vault(args: argparse.Namespace) -> tuple[list[dict], dict[str, str], st
     return json.loads(raw), names, server.rstrip("/")
 
 
-def uris_of(item: dict) -> list[str]:
-    return [uri for u in (item.get("login") or {}).get("uris") or [] if (uri := ((u or {}).get("uri") or "").strip())]
-
-
 def host_from(uri: str) -> str:
     try:
         parsed = urlparse(uri if "://" in uri else f"https://{uri}")
@@ -320,8 +324,9 @@ def to_logins(items: list[dict], order: FixOrder, folders: dict[str, str]) -> tu
         if not pw:
             no_password += 1
             continue
-        uris = uris_of(it)
+        uris = dd.uri_strings(it)
         hosts = [host_from(u) for u in uris]
+        first = dd.first_site_uri(uris)
         logins.append(Login(
             item_id=it["id"],
             name=it.get("name") or "(no name)",
@@ -329,12 +334,17 @@ def to_logins(items: list[dict], order: FixOrder, folders: dict[str, str]) -> tu
             host=hosts[0] if hosts else "",
             hosts=hosts,
             uris=uris,
+            site=dd.site_of(first) if first else "",
+            key=dd.account_key(it) or f"item:{it['id']}",
+            secure=any((p := dd.parse_uri(u)) is not None and p[0] == "https" for u in uris),
             password=pw,
             in_trash=bool(it.get("deletedDate")),
             tier=order.tier(hosts, folders.get(it.get("folderId"))),
             has_totp=bool(login.get("totp")),
             changed=when(login.get("passwordRevisionDate")),
             created=when(it.get("creationDate")),
+            revised=it.get("revisionDate") or "",
+            has_passkey=bool(dd.passkeys(it)),
         ))
     return logins, no_password
 
@@ -365,9 +375,10 @@ def hibp_counts(hashes: set[str]) -> dict[str, int]:
 
 
 def autofill_problem(l: Login) -> str | None:
+    """A login AutoFill will not offer reliably. A device at home (a router) has no https:// page, so it is not flagged."""
     if not l.uris:
         return "no web address saved"
-    if all(u.lower().startswith("http://") for u in l.uris):
+    if dd.http_only(l.uris) and not dd.on_devices(l.uris):
         return "only an http:// address saved"
     return None
 
@@ -389,6 +400,7 @@ def build(items: list[dict], order: FixOrder, folders: dict[str, str], check_hib
     rep.total = len(logins)
     rep.trashed = sum(1 for l in logins if l.in_trash)
     live = [l for l in logins if not l.in_trash]
+    rep.logins = live
 
     by_hash: dict[str, list[Login]] = defaultdict(list)
     for l in live:
@@ -396,7 +408,7 @@ def build(items: list[dict], order: FixOrder, folders: dict[str, str], check_hib
     for h, ls in by_hash.items():
         first: dict[str, Login] = {}
         for l in ls:
-            first.setdefault(l.account, l)
+            first.setdefault(l.key, l)  # copies of one site + username are one account, not reuse
         if len(first) > 1:
             rep.reused[h] = list(first.values())
 
@@ -411,17 +423,15 @@ def build(items: list[dict], order: FixOrder, folders: dict[str, str], check_hib
             rep.weak.append((l, score, warning))
 
     if check_hibp:
-        counts = hibp_counts(set(by_hash))
-        for h, n in counts.items():
+        rep.breaches = hibp_counts(set(by_hash))
+        for h, n in rep.breaches.items():
             for l in by_hash[h]:
                 rep.exposed.append((l, n))
         rep.hibp_checked = True
 
-    by_account: dict[str, list[Login]] = defaultdict(list)
-    for l in live:
-        if l.host and l.username:
-            by_account[f"{l.host}|{l.username.lower()}"].append(l)
-    rep.duplicates = {k: ls for k, ls in by_account.items() if len(ls) > 1}
+    rep.dupes = dd.find_groups(items)
+    rep.safe_merge = len(dd.select(rep.dupes, "merge")[0])
+    rep.fixable = {g.keeper["id"] for g in dd.find_fixes(items)[0]}
 
     for l in live:
         if twofa and not l.has_totp:
@@ -476,243 +486,690 @@ def compare(previous: dict | None, rep: Report) -> Progress:
     return Progress(previous["date"], len(before - now), now - before)
 
 
-def md_table(header: list[str], rows: list[list[str]]) -> str:
-    out = ["| " + " | ".join(header) + " |", "| " + " | ".join("---" for _ in header) + " |"]
-    out += ["| " + " | ".join(c.replace("|", "/") for c in r) + " |" for r in rows]
-    return "\n".join(out)
+# --- the sites: one per website + username, the unit every count and table uses ---------------------------
+
+@dataclass
+class Site:
+    key: str
+    logins: list[Login]
+    problems: dict[str, str] = field(default_factory=dict)   # reason -> a short detail ("" when none)
+
+    @property
+    def main(self) -> Login:
+        """The copy the account link opens: the one the duplicate cleanup would keep (a passkey's, else the newest)."""
+        return max(self.logins, key=lambda l: (l.has_passkey, l.revised, l.item_id))
+
+    @property
+    def name(self) -> str:
+        """What the Site column shows: the site, or the item's name when it has no address."""
+        return self.main.site or self.main.name
+
+    @property
+    def tier(self) -> int:
+        return min(l.tier for l in self.logins)
+
+    @property
+    def ids(self) -> list[str]:
+        return sorted(l.item_id for l in self.logins)
+
+    @property
+    def rank(self) -> int:
+        return min((SEVERITY.index(p) for p in self.problems), default=len(SEVERITY))
+
+    @property
+    def linkable(self) -> bool:
+        """A change-password link is offered only for a web site saved with an https:// or bare address."""
+        site = self.main.site
+        return bool(SAFE_HOST.fullmatch(site)) and not dd.is_device(site) and any(l.secure for l in self.logins)
 
 
-def render(rep: Report, progress: Progress, vault_url: str, today: str) -> str:
+@dataclass
+class Model:
+    """What both pages are drawn from."""
+    rep: Report
+    sites: dict[str, Site]
+    reuse_labels: dict[str, str]   # sha1 -> "A", "B", ...
+
+    def with_problem(self, reason: str) -> list[Site]:
+        return [s for s in self.sites.values() if reason in s.problems]
+
+    @property
+    def to_fix(self) -> list[Site]:
+        return sorted((s for s in self.sites.values() if s.problems), key=lambda s: (s.tier, s.rank, s.name.lower(), s.key))
+
+    @property
+    def need_password(self) -> list[Site]:
+        return [s for s in self.sites.values() if NEEDS_NEW_PASSWORD & set(s.problems)]
+
+
+def letters(n: int) -> str:
+    """0 -> A, 25 -> Z, 26 -> AA: a name for a reused password that says nothing about it."""
+    out = ""
+    n += 1
+    while n:
+        n, r = divmod(n - 1, 26)
+        out = chr(65 + r) + out
+    return out
+
+
+def model_of(rep: Report) -> Model:
+    sites: dict[str, Site] = {}
+    for l in rep.logins:
+        sites.setdefault(l.key, Site(l.key, [])).logins.append(l)
+    of = {l.item_id: sites[l.key] for l in rep.logins}
+
+    def mark(item_id: str, reason: str, detail: str = "") -> None:
+        if item_id in of:
+            of[item_id].problems.setdefault(reason, detail)
+
+    for l, _ in rep.exposed:
+        mark(l.item_id, EXPOSED)
+    labels = {h: letters(n) for n, (h, _) in enumerate(sorted(rep.reused.items(), key=lambda kv: (-len(kv[1]), kv[1][0].key)))}
+    for h, ls in rep.reused.items():
+        for l in ls:
+            mark(l.item_id, REUSED, f" ×{len(ls)}")
+    for l, _, _ in rep.weak:
+        mark(l.item_id, WEAK)
+    for g in rep.dupes:
+        for i in [g.keeper, *g.others]:
+            mark(i["id"], DUPLICATE)
+    for l, _ in rep.twofa:
+        mark(l.item_id, TWOFA)
+    for l, _ in rep.autofill:
+        mark(l.item_id, AUTOFILL)
+    for l, _, _ in rep.old:
+        mark(l.item_id, OLD)
+    return Model(rep, sites, labels)
+
+
+# --- HTML: built straight from the data. Every piece of vault text goes through esc(); nothing is Markdown. ----
+
+def esc(text: str) -> str:
+    return html.escape(text, quote=True)
+
+
+def svg(shape: str) -> str:
+    """A small inline icon. It always sits next to a word, so screen readers skip it."""
+    return (f'<svg class="i" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true" focusable="false">'
+            f'{SHAPES[shape]}</svg>')
+
+
+SHAPES = {
+    EXPOSED: '<path d="M5 .5 9.7 9.3H.3Z" fill="currentColor"/>',
+    REUSED: '<path d="M5 0 10 5 5 10 0 5Z" fill="currentColor"/>',
+    WEAK: '<circle cx="5" cy="5" r="4" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M5 1a4 4 0 0 0 0 8Z" fill="currentColor"/>',
+    OLD: '<circle cx="5" cy="5" r="4" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M5 2.5V5l2 1.5" fill="none" stroke="currentColor" stroke-width="1.4"/>',
+    DUPLICATE: '<rect x=".7" y="3.2" width="5.6" height="5.6" fill="none" stroke="currentColor" stroke-width="1.3"/><rect x="3.7" y=".7" width="5.6" height="5.6" fill="currentColor"/>',
+    TWOFA: '<circle cx="5" cy="5" r="4" fill="none" stroke="currentColor" stroke-width="1.4"/><circle cx="5" cy="5" r="1.7" fill="currentColor"/>',
+    AUTOFILL: '<path d="M4 0h2v4h4v2H6v4H4V6H0V4h4Z" fill="currentColor"/>',
+    "new": '<path d="m5 0 1.5 3.3 3.5.4-2.6 2.4.7 3.5L5 7.9 1.9 9.6l.7-3.5L0 3.7l3.5-.4Z" fill="currentColor"/>',
+    "ok": '<path d="M1 5.2 4 8l5-6.5" fill="none" stroke="currentColor" stroke-width="1.8"/>',
+    "tidy": '<rect x="1" y="1" width="8" height="8" fill="currentColor"/>',
+    "arrow": '<path d="M2.5 7.5 7.5 2.5M3.5 2.5h4v4" fill="none" stroke="currentColor" stroke-width="1.3"/>',
+    "key": '<circle cx="3.2" cy="6.8" r="2.3" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M4.9 5.1 9.5.5M7.6 2.4l1.4 1.4" fill="none" stroke="currentColor" stroke-width="1.3"/>',
+}
+
+
+def chip(kind: str, extra: str = "") -> str:
+    return f'<span class="chip c-{kind}">{svg(kind)}{CHIP_WORDS[kind]}{esc(extra)}</span>'
+
+
+def item_href(vault: str, item_id: str) -> str | None:
+    return f"{vault}/#/vault?itemId={item_id}" if vault and SAFE_ID.fullmatch(item_id) else None
+
+
+def link(href: str, text_html: str, title: str, icon: str) -> str:
+    """A value that is also a link: it looks like plain text until hovered. The href is built here, never taken from the vault."""
+    return (f'<a class="v" href="{esc(href)}" title="{title}" target="_blank" rel="noopener noreferrer">'
+            f'{text_html}{svg(icon)}</a>')
+
+
+def site_cell(s: Site) -> str:
+    """The site's name, linked to its change-password address when it is a web site saved with https://."""
+    if s.linkable:
+        return link(f"https://{s.main.site}/.well-known/change-password", esc(s.name), "Change password", "arrow")
+    return esc(s.name)
+
+
+def account_html(vault: str, login: Login, text: str | None = None) -> str:
+    """The account (or the given text), linked to the item in the Bitwarden web vault."""
+    shown = text if text is not None else login.username
+    inner = esc(shown) if shown else '<span class="muted">(no username)</span>'
+    href = item_href(vault, login.item_id)
+    return link(href, inner, "Open in Bitwarden", "key") if href else inner
+
+
+def copies_cell(vault: str, s: Site) -> str:
+    """How many copies, and, opened, each copy's addresses with a link to that copy."""
+    hosts = {h for l in s.logins for h in l.hosts}
+    if len(s.logins) == 1 and len(hosts) <= 1:
+        return "1"
+    lines = "".join(f'<li>{account_html(vault, l, l.name)} <span class="muted">{esc(", ".join(l.hosts) or "no address")}</span></li>'
+                    for l in sorted(s.logins, key=lambda l: (l.hosts, l.item_id)))
+    return f'<details><summary>{len(s.logins)}</summary><ul class="hosts">{lines}</ul></details>'
+
+
+def problem_chips(s: Site, new: bool) -> str:
+    out = [chip(p, s.problems[p]) for p in SEVERITY if p in s.problems]
+    if new:
+        out.append(chip("new"))
+    return " ".join(out)
+
+
+Cell = tuple[str, "str | int | None"]   # (cell html, sort key or None for the cell's text)
+
+
+def table(cls: str, headers: list[str], rows: list[tuple[list[str], list[Cell]]]) -> str:
+    """rows: (the item ids the row stands for, its cells). The ids are what a done tick is kept under."""
+    head = "".join(f'<th scope="col">{h}</th>' for h in headers)
+    body = []
+    for ids, cells in rows:
+        safe_ids = " ".join(i for i in ids if SAFE_ID.fullmatch(i))
+        attrs = f' data-ids="{esc(safe_ids)}"' if safe_ids else ""
+        tds = "".join(f'<td data-sort="{esc(str(k))}">{c}</td>' if k is not None else f"<td>{c}</td>" for c, k in cells)
+        body.append(f"<tr{attrs}>{tds}</tr>")
+    return (f'<div class="scroll"><table class="list {cls}"><thead><tr>{head}</tr></thead>'
+            f'<tbody>{"".join(body)}</tbody></table></div>')
+
+
+def empty_card(anchor: str, title: str, text: str, extra: str = "") -> str:
+    """A section with nothing in it: no heading, one line."""
+    return f'<section class="card empty" id="{anchor}"><p><strong>{title}:</strong> {text}</p>{extra}</section>'
+
+
+def section(anchor: str, title: str, intro: str, body: str, extra: str = "") -> str:
+    return f'<section class="card" id="{anchor}"><h2>{title}</h2>{intro}{body}{extra}</section>'
+
+
+def command(paste_line: str, user: str, words: str) -> str:
+    """The exact line to run, or, without a known paste line, the words to add to it."""
+    if paste_line:
+        who = f" --user {user}" if user else ""
+        return f"<code>{esc(paste_line)}{esc(who)} {esc(words)}</code>"
+    return f"<code>{esc(words)}</code> (added after <code>bash -s --</code> on the paste line)"
+
+
+def plural(n: int, one: str, many: str) -> str:
+    return f"{n} {one if n == 1 else many}"
+
+
+# --- the dashboard: shared by the report and the summary ------------------------------------------------
+
+CARD_LEVELS = {"urgent": ("Urgent", EXPOSED), "soon": ("Fix soon", REUSED), "check": ("Check", TWOFA), "tidy": ("Tidy", "tidy")}
+
+
+def card(title: str, value: str, level: str, note: str = "") -> str:
+    """A score card. Its level is a word and a shape as well as a color; a zero reads OK."""
+    ok = value == "0" and level != "total"
+    if not value.isdigit():  # a check that did not run is neither good nor bad
+        level, badge = "total", '<span class="lvl lvl-total">Not run</span>'
+    elif level == "total":
+        badge = '<span class="lvl lvl-total">Total</span>'
+    elif ok:
+        badge = f'<span class="lvl lvl-ok">{svg("ok")}OK</span>'
+    else:
+        word, shape = CARD_LEVELS[level]
+        badge = f'<span class="lvl lvl-{level}">{svg(shape)}{word}</span>'
+    sub = f'<span class="sub">{note}</span>' if note else ""
+    return (f'<div class="score s-{"ok" if ok else level}">{badge}<span class="num">{value}</span>'
+            f'<span class="what">{title}</span>{sub}</div>')
+
+
+def ring(work: int, total: int) -> str:
+    """Sites needing work against sites with nothing to do. The two parts differ in thickness as well as color."""
+    c = 2 * math.pi * 50
+    part = c * work / total if total else 0
+    return (f'<figure class="ring"><svg viewBox="0 0 120 120" width="150" height="150" role="img" '
+            f'aria-label="{work} of {total} sites need work">'
+            f'<circle cx="60" cy="60" r="50" fill="none" class="ring-fine" stroke-width="8"/>'
+            f'<circle cx="60" cy="60" r="50" fill="none" class="ring-work" stroke-width="16" '
+            f'stroke-dasharray="{part:.2f} {c:.2f}" transform="rotate(-90 60 60)"/>'
+            f'<text x="60" y="62" text-anchor="middle" class="ring-num">{work}</text>'
+            f'<text x="60" y="80" text-anchor="middle" class="ring-of">of {total} need work</text></svg>'
+            f'<figcaption><span class="key-work">{svg(EXPOSED)} thick: {work} need work</span>'
+            f'<span class="key-fine">{svg("ok")} thin: {total - work} with nothing to do</span></figcaption></figure>')
+
+
+def bars(title: str, rows: list[tuple[str, str, int]]) -> str:
+    """Horizontal bars, each with its word and its number: the color only repeats what the word says.
+    rows: (word, kind, count), the kind naming the color and, for a problem, its shape."""
+    top = max((n for _, _, n in rows), default=0) or 1
+    out = "".join(f'<div class="bar"><span class="bl">{svg(kind) if kind in SHAPES else ""}{esc(word)}</span>'
+                  f'<span class="track"><span class="fill f-{kind}" style="width:{100 * n / top:.1f}%"></span></span>'
+                  f'<span class="bn">{n}</span></div>' for word, kind, n in rows)
+    return f'<div class="bars"><h3>{title}</h3>{out}</div>'
+
+
+def dashboard(m: Model, for_summary: bool) -> str:
+    rep = m.rep
+    total, need, work = len(m.sites), len(m.need_password), len(m.to_fix)
+    smaller, fine = work - need, total - work
+    exposed = str(len(m.with_problem(EXPOSED))) if rep.hibp_checked else "not checked"
+    twofa = "not checked" if rep.twofa_skipped else str(len(m.with_problem(TWOFA)))
+    cards = "".join([
+        card("Sites", str(total), "total", "one per website and username"),
+        card("Need a new password", str(need), "urgent"),
+        card("Exposed", exposed, "urgent"),
+        card("Reused", str(len(m.with_problem(REUSED))), "soon"),
+        card("Weak", str(len(m.with_problem(WEAK))), "soon"),
+        card("Duplicates", str(len(m.with_problem(DUPLICATE))), "tidy", "" if for_summary else f"{rep.safe_merge} groups safe to merge"),
+        card("Two-step to check", twofa, "check"),
+        card("AutoFill fixes", str(len(m.with_problem(AUTOFILL))), "tidy", "" if for_summary else f"{len(rep.fixable)} can be fixed for you"),
+    ])
+    headline = (f'<p class="headline"><strong>{need} of your {total} sites need a new password</strong>: the password is exposed '
+                f'in a breach, reused on another site, or weak. {plural(smaller, "more site needs", "more sites need")} a smaller '
+                f'fix: two-step login to check, an AutoFill address, a duplicate to merge or an old password. The other {fine} '
+                f'{"has" if fine == 1 else "have"} nothing to do. A site is one website and one username: copies of the same login, '
+                f'and its other addresses, count once.</p>')
+    notes = f'<p class="muted">Separately, {plural(len(rep.notes), "note", "notes")} may hold a password.</p>' if rep.notes else ""
+    problem_rows = [(CHIP_WORDS[p], p, len(m.with_problem(p))) for p in SEVERITY]
+    tier_rows = [(f"{t} · {name}", "tier", sum(1 for s in m.to_fix if s.tier == t)) for t, name in TIER_NAMES.items()]
+    return (f'<section class="dash">{ring(work, total)}<div class="lead">{headline}{notes}</div></section>'
+            f'<div class="scores">{cards}</div><div class="charts">{bars("Sites per problem", problem_rows)}'
+            f'{bars("Sites to fix, by priority", tier_rows)}</div>')
+
+
+# --- the report ------------------------------------------------------------------------------------------
+
+def breach_bar(n: int) -> str:
+    """The count, with a bar on a log scale: ten million times or more fills it."""
+    width = min(100.0, 100 * math.log10(n + 1) / 7)
+    return f'<span class="meter"><span class="mfill f-exposed" style="width:{width:.0f}%"></span></span> {n:,}'
+
+
+def strength_bar(score: int) -> str:
+    """Four segments, as many filled as the score, and the score in words."""
+    segs = "".join(f'<span class="seg{" on" if k < score else ""}"></span>' for k in range(4))
+    return f'<span class="strength" aria-hidden="true">{segs}</span> {score} of 4'
+
+
+def render(rep: Report, progress: Progress, vault_url: str, today: str, paste_line: str, user: str) -> str:
     vault = vault_url if SAFE_VAULT_URL.fullmatch(vault_url) else ""
-    exposed_ids = {l.account for l, _ in rep.exposed}
-    reused_ids = {l.account for ls in rep.reused.values() for l in ls}
-    weak_ids = {l.account for l, _, _ in rep.weak}
-    at_risk: dict[str, Login] = {}
-    for l in [l for ls in rep.reused.values() for l in ls] + [l for l, _, _ in rep.weak] + [l for l, _ in rep.exposed]:
-        at_risk.setdefault(l.account, l)
+    m = model_of(rep)
 
-    def marked(text: str, item_id: str) -> str:
-        return f"{text} **NEW**" if item_id in progress.new else text
+    def is_new(s: Site) -> bool:
+        return any(i in progress.new for i in s.ids)
 
-    def item_link(item_id: str) -> list[str]:
-        return [f"[Open in Bitwarden]({vault}/#/vault?itemId={item_id})"] if vault and SAFE_ID.fullmatch(item_id) else []
+    def who(s: Site) -> str:
+        return account_html(vault, s.main)
 
-    def links(l: Login, change_password: bool = False) -> str:
-        """Links are built from the saved address only; no site is contacted to see whether a page exists."""
-        out = []
-        if SAFE_HOST.fullmatch(l.host):
-            if change_password:
-                out.append(f"[Change password](https://{l.host}/.well-known/change-password)")
-            out.append(f"[Site](https://{l.host}/)")
-        return ", ".join(out + item_link(l.item_id))
+    def where(s: Site) -> list[Cell]:
+        return [(site_cell(s), s.name.lower()), (who(s), s.main.username.lower())]
 
     flagged = rep.flags()
-    lines = ["# Bitwarden password health report", "", f"Check-up of {today}.", ""]
     if progress.since is None:
-        lines.append(f"**First check-up of this vault on this Mac: {len(flagged)} flagged.** The next one will show what changed.")
+        progress_line = (f"<strong>First check-up of this vault on this Mac: {plural(len(flagged), 'entry', 'entries')} flagged.</strong> "
+                         "The next one will show what changed.")
     else:
         new = f" {len(progress.new)} new since then, marked NEW." if progress.new else ""
-        lines.append(f"**{progress.fixed} fixed since {progress.since}, {len(flagged)} left.**{new}")
-    lines.append("")
-    lines.append(md_table(
-        ["Check", "Count"],
-        [["Logins with a password", str(rep.total - rep.trashed)],
-         ["In trash (ignored, empty it)", str(rep.trashed)],
-         ["Logins with no password", str(rep.no_password)],
-         ["Exposed in a breach", str(len(rep.exposed)) if rep.hibp_checked else "not checked (--no-hibp)"],
-         ["Reused (accounts sharing a password)", str(len(reused_ids))],
-         ["Distinct passwords reused", str(len(rep.reused))],
-         ["Weak", str(len(rep.weak))],
-         ["Duplicate entries (same site + username)", str(sum(len(v) for v in rep.duplicates.values()))],
-         ["**Logins that need a new password**", f"**{len(at_risk)}**"],
-         ["Sites that offer two-step login, no code saved here",
-          f"not checked this run ({rep.twofa_skipped})" if rep.twofa_skipped else str(len(rep.twofa))],
-         ["AutoFill problems", str(len(rep.autofill))],
-         ["Passwords unchanged for 3+ years", str(len(rep.old))],
-         ["Notes that may hold a password", str(len(rep.notes))]],
-    ))
-    lines.append("")
+        progress_line = f"<strong>{progress.fixed} fixed since {esc(progress.since)}, {len(flagged)} left.</strong>{new}"
+    progress_line += ' <span class="muted">Counted in Bitwarden entries: one site can have several.</span>'
+    totals = (f'<p class="totals muted">Logins with a password: {rep.total - rep.trashed} · In trash (ignored, empty it): '
+              f'{rep.trashed} · Logins with no password: {rep.no_password} · Distinct passwords reused: {len(rep.reused)}</p>')
 
-    lines += ["## Fix in this order", ""]
-    if not at_risk:
-        lines.append("Nothing. Every live password is unique, strong and unseen in a breach.")
+    parts = [f'<header><h1>Bitwarden check-up</h1><p class="date">Check-up of {esc(today)}.</p>'
+             f'<p class="progress">{progress_line}</p></header>', dashboard(m, for_summary=False), totals]
+    first = m.to_fix[:FIX_FIRST]
+    if first:
+        items = "".join(f"<li>{site_cell(s)} · {who(s)} {problem_chips(s, is_new(s))}</li>" for s in first)
+        parts.append(f'<section class="card" id="first"><h2>Fix these first</h2><p class="muted">The top {len(first)}, by priority '
+                     f'and then by how serious the problem is.</p><ol class="first">{items}</ol></section>')
+    parts += ['<p class="help">Click a site to change its password (if you land on the home page, look under account settings). '
+              'Click the account to open it in Bitwarden.</p>', TOOLS]
+
+    # Everything to fix: one row per site.
+    if m.to_fix:
+        rows = [(s.ids, [(f"{s.tier} · {esc(TIER_NAMES[s.tier])}", s.tier), *where(s),
+                         (problem_chips(s, is_new(s)), s.rank), (copies_cell(vault, s), len(s.logins))]) for s in m.to_fix]
+        parts.append(section("fix", "Fix in this order", "<p>Email and main accounts first, then money and shopping, then phone, "
+                             "utilities, insurance and health, then gaming and social, then everything else.</p>",
+                             table("main", ["Priority", "Site", "Account", "Problems", "Copies"], rows)))
     else:
-        lines += ["\"Change password\" opens the site's own change-password page where it has one; if that page is "
-                  "missing, use \"Site\" and look under account settings.", ""]
-        rows = []
-        for l in sorted(at_risk.values(), key=lambda x: (x.tier, 0 if x.account in exposed_ids else 1, x.name.lower())):
-            why = ", ".join(w for w, hit in (("exposed", l.account in exposed_ids),
-                                             ("reused", l.account in reused_ids),
-                                             ("weak", l.account in weak_ids)) if hit)
-            rows.append([TIER_NAMES[l.tier], marked(l.label, l.item_id), why, links(l, change_password=True)])
-        lines.append(md_table(["Priority", "Login", "Why", "Links"], rows))
-    lines.append("")
+        parts.append(empty_card("fix", "Fix in this order", "Nothing found. Every live password is unique, strong and unseen in a breach."))
 
-    if rep.hibp_checked:
-        lines += ["## Exposed in a breach", ""]
-        if rep.exposed:
-            lines.append("Change these today. The count is how many times that exact password appears in public breach dumps.")
-            lines.append("")
-            lines.append(md_table(["Login", "Seen in breaches"],
-                                  [[l.label, f"{n:,}"] for l, n in sorted(rep.exposed, key=lambda x: -x[1])]))
-        else:
-            lines.append("None.")
-        lines.append("")
+    # Exposed.
+    if not rep.hibp_checked:
+        parts.append(empty_card("exposed", "Exposed in a breach", "not checked this run (--no-hibp)."))
+    elif m.with_problem(EXPOSED):
+        seen: dict[str, int] = defaultdict(int)
+        for l, n in rep.exposed:
+            seen[l.key] = max(seen[l.key], n)
+        rows = [(s.ids, [*where(s), (breach_bar(seen[s.key]), seen[s.key])])
+                for s in sorted(m.with_problem(EXPOSED), key=lambda s: (-seen[s.key], s.name.lower()))]
+        parts.append(section("exposed", "Exposed in a breach", "<p>Change these today. The count is how many times that exact "
+                             "password appears in public breach lists.</p>", table("exposed", ["Site", "Account", "Seen in breaches"], rows)))
+    else:
+        parts.append(empty_card("exposed", "Exposed in a breach", "Nothing found."))
 
-    lines += ["## Reused passwords", ""]
+    # Reused: one row per password, never the password itself.
     if rep.reused:
-        for n, (h, ls) in enumerate(sorted(rep.reused.items(), key=lambda kv: -len(kv[1])), start=1):
-            lines.append(f"**Password group {n}: used {len(ls)} times**")
-            lines += [f"- {l.label}" for l in sorted(ls, key=lambda x: x.name.lower())]
-            lines.append("")
+        rows = []
+        for h, ls in sorted(rep.reused.items(), key=lambda kv: (len(m.reuse_labels[kv[0]]), m.reuse_labels[kv[0]])):
+            members = sorted({l.key: m.sites[l.key] for l in ls}.values(), key=lambda s: s.name.lower())
+            listed = "".join(f"<li>{site_cell(s)} · {who(s)}</li>" for s in members)
+            if h in rep.breaches:
+                breached = f"{chip(EXPOSED)} seen {rep.breaches[h]:,} times"
+            else:
+                breached = "No" if rep.hibp_checked else "not checked"
+            rows.append(([i for s in members for i in s.ids],
+                         [(f"Password {m.reuse_labels[h]}", f"{len(m.reuse_labels[h]):02d}{m.reuse_labels[h]}"), (str(len(ls)), len(ls)),
+                          (f'<details><summary>{plural(len(members), "site", "sites")}</summary><ul class="hosts">{listed}</ul></details>', None),
+                          (breached, rep.breaches.get(h, 0))]))
+        parts.append(section("reused", "Reused passwords", "<p>Each group is one password used on several sites. The password itself "
+                             "is never shown: give each site its own.</p>",
+                             table("reused", ["Group", "Used on N sites", "Sites", "Any exposed?"], rows)))
     else:
-        lines += ["None.", ""]
+        parts.append(empty_card("reused", "Reused passwords", "Nothing found."))
 
-    lines += ["## Weak passwords", ""]
+    # Weak: a site's weakest password.
     if rep.weak:
-        lines.append(md_table(["Login", "Score (0-4)", "Why"],
-                              [[l.label, str(s), w or "short or predictable"]
-                               for l, s, w in sorted(rep.weak, key=lambda x: (x[1], x[0].name.lower()))]))
+        worst: dict[str, tuple[int, str]] = {}
+        for l, score, warning in rep.weak:
+            if l.key not in worst or score < worst[l.key][0]:
+                worst[l.key] = (score, warning)
+        rows = [(s.ids, [*where(s), (strength_bar(worst[s.key][0]), worst[s.key][0]), (esc(worst[s.key][1] or "short or predictable"), None)])
+                for s in sorted(m.with_problem(WEAK), key=lambda s: (worst[s.key][0], s.name.lower()))]
+        parts.append(section("weak", "Weak passwords", "<p>Strength runs from 0 (guessed at once) to 4 (strong).</p>",
+                             table("weak", ["Site", "Account", "Strength (0-4)", "Why"], rows)))
     else:
-        lines.append("None.")
-    lines.append("")
+        parts.append(empty_card("weak", "Weak passwords", "Nothing found."))
 
-    lines += ["## Duplicate entries", ""]
-    if rep.duplicates:
-        lines.append("Same site and username saved more than once, usually one from Apple and one from Chrome. Keep the newest, delete the rest, then empty the trash.")
-        lines.append("")
-        for key, ls in sorted(rep.duplicates.items()):
-            host, user = key.split("|", 1)
-            lines.append(f"- {plain(host)} ({plain(user)}): {len(ls)} copies")
+    # Duplicates: the duplicate cleanup's own groups, so the report says exactly what it would do.
+    if rep.dupes:
+        rows = []
+        for g in sorted(rep.dupes, key=lambda g: g.account):
+            members = [g.keeper, *g.others]
+            site = g.account.partition("|")[0]
+            keeper_user = dd.login_of(g.keeper).get("username") or ""
+            href = item_href(vault, g.keeper["id"])
+            account = link(href, esc(keeper_user), "Open in Bitwarden", "key") if href else esc(keeper_user)
+            s = m.sites.get(g.account)
+            if not g.blocked:
+                safe, order_key = "Yes", 0
+            elif g.blocked == dd.DIFFERENT_PASSWORDS:
+                safe, order_key = "Needs pick", 1
+            else:
+                safe, order_key = f"No: {esc(g.blocked)}", 2
+            rows.append(([i["id"] for i in members], [(site_cell(s) if s else esc(site), site), (account, keeper_user.lower()),
+                                                       (str(len(members)), len(members)), (safe, order_key)]))
+        how = (f"<p>{plural(rep.safe_merge, 'group is', 'groups are')} safe to merge: same site, same username and the same password. "
+               f"Merging keeps one copy (the one with a passkey, otherwise the newest), adds the others' addresses, notes, one-time "
+               f"code and custom fields to it, and moves the rest to Bitwarden's Trash for 30 days. See what it would do, changing "
+               f"nothing: {command(paste_line, user, 'dedupe merge')}. Then act on one group first: "
+               f"{command(paste_line, user, 'dedupe merge apply 1')}, and type DEDUPE when asked. \"Needs pick\" means the copies "
+               f"have different passwords: {command(paste_line, user, 'dedupe pick')} lets you choose the one that works.</p>")
+        parts.append(section("duplicates", "Duplicate entries", "<p>The same site and username saved more than once, usually one "
+                             "copy from Apple and one from Chrome.</p>",
+                             table("dupes", ["Site", "Account", "Copies", "Safe to merge?"], rows), how))
     else:
-        lines.append("None.")
-    lines.append("")
+        parts.append(empty_card("duplicates", "Duplicate entries", "Nothing found."))
 
-    lines += ["## Two-step login", ""]
+    # Two-step: one row per website, its accounts listed.
+    credit = ('<p class="credit muted">Data sourced from <a href="https://2fa.directory/" target="_blank" '
+              'rel="noopener noreferrer">2FA Directory</a> by 2factorauth.</p>')
     if rep.twofa_skipped:
-        lines.append(f"Not checked this run: {rep.twofa_skipped}. This does not mean none were found.")
+        parts.append(section("two-step", "Two-step login", f"<p>Not checked this run: {esc(rep.twofa_skipped)}. "
+                             "This does not mean none were found.</p>", ""))
     elif rep.twofa:
-        lines += ["For each login below: this site offers two-step login; check it's on. No one-time code is saved in the "
-                  "Bitwarden entry, and the entry cannot show whether two-step login is already on at the site (a text "
-                  "message or another app would not show here).", "",
-                  f"\"{SUPPORTS.capitalize()}\" means the saved address itself is on the public list. "
-                  f"\"{LIKELY.capitalize()}\" means only a related address is: one above or below it, or another "
-                  "address of the same site.", ""]
-        lines.append(md_table(["Priority", "Login", "Match", "Links"],
-                              [[TIER_NAMES[l.tier], marked(l.label, l.item_id), how, links(l)]
-                               for l, how in sorted(rep.twofa, key=lambda x: (x[0].tier, x[0].name.lower()))]))
+        how_of = {l.item_id: how for l, how in rep.twofa}
+        by_site: dict[str, list[Site]] = defaultdict(list)
+        for s in m.with_problem(TWOFA):
+            by_site[s.name].append(s)
+        rows = []
+        for name, group in sorted(by_site.items(), key=lambda kv: (min(s.tier for s in kv[1]), kv[0].lower())):
+            matches = {how_of[i] for s in group for i in s.ids if i in how_of}
+            accounts = ", ".join(who(s) for s in sorted(group, key=lambda s: s.main.username.lower()))
+            rows.append(([i for s in group for i in s.ids],
+                         [(site_cell(group[0]), name.lower()), (accounts, None), (SUPPORTS if SUPPORTS in matches else LIKELY, None)]))
+        intro = ("<p>For each site below: this site offers two-step login; check it's on. No one-time code is saved in the "
+                 "Bitwarden entry, and the entry cannot show whether two-step login is already on at the site (a text message or "
+                 "another app would not show here).</p>"
+                 f"<p>\"{SUPPORTS.capitalize()}\" means the saved address itself is on the public list. \"{LIKELY.capitalize()}\" "
+                 "means only a related address is: one above or below it, or another address of the same site.</p>")
+        parts.append(section("two-step", "Two-step login", intro, table("twofa", ["Site", "Accounts", "Match"], rows), credit))
     else:
-        lines.append("None.")
-    if not rep.twofa_skipped:
-        lines += ["", "_Data sourced from [2FA Directory](https://2fa.directory/) by 2factorauth._"]
-    lines.append("")
+        parts.append(empty_card("two-step", "Two-step login", "Nothing found.", credit))
 
-    lines += ["## AutoFill problems", ""]
+    # AutoFill.
     if rep.autofill:
-        lines += ["iPhone AutoFill matches a login by its web address, so these will not be offered reliably. Add the "
-                  "site's https:// address to the entry.", ""]
-        lines.append(md_table(["Login", "Problem", "Links"],
-                              [[marked(l.label, l.item_id), problem, links(l)]
-                               for l, problem in sorted(rep.autofill, key=lambda x: x[0].name.lower())]))
+        problem_of = {l.item_id: p for l, p in rep.autofill}
+        rows = [(s.ids, [*where(s), (esc(", ".join(sorted({problem_of[i] for i in s.ids if i in problem_of}))), None)])
+                for s in sorted(m.with_problem(AUTOFILL), key=lambda s: s.name.lower())]
+        fixable = len(rep.fixable)
+        how = (f"<p>{plural(fixable, 'login', 'logins')} saved with only an http:// address can get the https:// address added for "
+               f"you, and nothing else changes. See the list first, changing nothing: {command(paste_line, user, 'fixurls')}. Then "
+               f"act on one: {command(paste_line, user, 'fixurls apply 1')}, and type FIXURLS when asked. A login that holds a "
+               f"passkey is left for you to fix by hand.</p>") if fixable else ""
+        parts.append(section("autofill", "AutoFill problems", "<p>iPhone AutoFill matches a login by its web address, so these will "
+                             "not be offered reliably. Add the site's https:// address to the entry.</p>",
+                             table("autofill", ["Site", "Account", "Problem"], rows), how))
     else:
-        lines.append("None.")
-    lines.append("")
+        parts.append(empty_card("autofill", "AutoFill problems", "Nothing found."))
 
-    lines += ["## Passwords unchanged for 3+ years", ""]
-    lines += ["Importing passwords resets these dates, so right after an import nothing is old yet: this list only means "
-              "something on later check-ups.", ""]
-    if rep.recently_added:
-        lines += [f"{rep.recently_added} login(s) were added in the last 30 days (an import, for example) and are not "
-                  "judged here yet.", ""]
+    # Old passwords: they mean something only once the import's dates are behind.
     if rep.old:
-        lines.append(md_table(["Priority", "Login", "Since", "Links"],
-                              [[TIER_NAMES[l.tier], marked(l.label, l.item_id), f"{kind} {since.astimezone():%Y-%m-%d}",
-                                links(l, change_password=True)]
-                               for l, since, kind in sorted(rep.old, key=lambda x: (x[0].tier, x[1]))]))
+        oldest: dict[str, tuple[datetime, str]] = {}
+        for l, since, kind in rep.old:
+            if l.key not in oldest or since < oldest[l.key][0]:
+                oldest[l.key] = (since, kind)
+        rows = [(s.ids, [(f"{s.tier} · {esc(TIER_NAMES[s.tier])}", s.tier), *where(s),
+                         (f"{oldest[s.key][1]} {oldest[s.key][0].astimezone():%Y-%m-%d}", oldest[s.key][0].isoformat())])
+                for s in sorted(m.with_problem(OLD), key=lambda s: (s.tier, oldest[s.key][0]))]
+        later = (f'<p class="muted">{plural(rep.recently_added, "login was", "logins were")} added in the last 30 days (an import, '
+                 "for example) and will be checked on later runs.</p>") if rep.recently_added else ""
+        parts.append(section("old", "Passwords unchanged for 3+ years", "", table("old", ["Priority", "Site", "Account", "Since"], rows), later))
+    elif rep.recently_added and rep.recently_added == len(rep.logins):
+        parts.append(empty_card("old", "Passwords unchanged for 3+ years", "Checked on later runs."))
     else:
-        lines.append("None.")
-    lines.append("")
+        later = (f" {plural(rep.recently_added, 'login', 'logins')} added in the last 30 days will be checked on later runs."
+                 if rep.recently_added else "")
+        parts.append(empty_card("old", "Passwords unchanged for 3+ years", f"Nothing found.{later}"))
 
-    lines += ["## Notes that may hold a password", ""]
+    # Notes: the item's name and the reason, never the note.
     if rep.notes:
-        lines += ["A password kept in a note is not checked, not filled in and easy to forget. Move it into the entry's "
-                  "password field, or a hidden custom field. The note's text is never shown here.", ""]
-        lines.append(md_table(["Item", "Kind", "Why", "Links"],
-                              [[marked(plain(hit.name), hit.item_id), hit.kind, hit.reason, ", ".join(item_link(hit.item_id))]
-                               for hit in sorted(rep.notes, key=lambda x: x.name.lower())]))
+        rows = []
+        for hit in sorted(rep.notes, key=lambda x: x.name.lower()):
+            href = item_href(vault, hit.item_id)
+            name = link(href, esc(hit.name), "Open in Bitwarden", "key") if href else esc(hit.name)
+            if hit.item_id in progress.new:
+                name += " " + chip("new")
+            rows.append(([hit.item_id], [(name, hit.name.lower()), (hit.kind, None), (esc(hit.reason), None)]))
+        parts.append(section("notes", "Notes that may hold a password", "<p>A password kept in a note is not checked, not filled in "
+                             "and easy to forget. Move it into the entry's password field, or a hidden custom field. The note's text "
+                             "is never shown here.</p>", table("notes", ["Item", "Kind", "Why"], rows)))
     else:
-        lines.append("None.")
-    lines.append("")
+        parts.append(empty_card("notes", "Notes that may hold a password", "Nothing found."))
 
-    lines += ["## Your Bitwarden account", ""]
-    lines.append("This check-up cannot see whether your Bitwarden email address is verified, or whether two-step login "
-                 "is turned on for Bitwarden itself. Please check both:")
+    # Your Bitwarden account.
     if vault:
-        lines += [f"- [Account settings]({vault}/#/settings/account): a notice at the top asks you to verify your email if it is not verified yet.",
-                  f"- [Two-step login]({vault}/#/settings/security/two-factor): Settings, then Security, then Two-step login."]
+        pointers = (f'<ul><li><a href="{esc(vault)}/#/settings/account" target="_blank" rel="noopener noreferrer">Account settings</a>: '
+                    "a notice at the top asks you to verify your email if it is not verified yet.</li>"
+                    f'<li><a href="{esc(vault)}/#/settings/security/two-factor" target="_blank" rel="noopener noreferrer">Two-step '
+                    "login</a>: Settings, then Security, then Two-step login.</li></ul>")
     else:
-        lines += ["- In the Bitwarden web vault, open Settings, then My account: a notice asks you to verify your email if it is not verified yet.",
-                  "- In the Bitwarden web vault, open Settings, then Security, then Two-step login."]
-    lines.append("")
-    lines.append("_Passwords themselves are never shown in this report. Breach check: Have I Been Pwned range API (k-anonymity)._")
-    return "\n".join(lines)
+        pointers = ("<ul><li>In the Bitwarden web vault, open Settings, then My account: a notice asks you to verify your email if it "
+                    "is not verified yet.</li><li>In the Bitwarden web vault, open Settings, then Security, then Two-step login.</li></ul>")
+    parts.append(section("account", "Your Bitwarden account", "<p>This check-up cannot see whether your Bitwarden email address is "
+                         "verified, or whether two-step login is turned on for Bitwarden itself. Please check both:</p>", pointers))
+    parts.append('<footer class="muted">Passwords themselves are never shown in this report. Breach check: Have I Been Pwned '
+                 'range API (k-anonymity).</footer>')
+    return page("Bitwarden check-up", "".join(parts), SCRIPT)
 
 
-HTML_HEAD = """<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Bitwarden password health report</title><style>
-body{font:16px/1.5 -apple-system,Helvetica,Arial,sans-serif;max-width:1000px;margin:2rem auto;padding:0 1rem;color:#111}
-h1{font-size:1.6rem}h2{font-size:1.2rem;margin-top:2rem;border-bottom:2px solid #ddd;padding-bottom:.25rem}
-table{border-collapse:collapse;width:100%;margin:.5rem 0}th,td{border:1px solid #ccc;padding:.4rem .6rem;text-align:left;vertical-align:top}
-th{background:#f3f3f3}tr:nth-child(even) td{background:#fafafa}li{margin:.15rem 0}a{text-decoration:underline}
-</style></head><body>
+# --- the summary: counts only, to share ------------------------------------------------------------------
+
+HOW_USED = {
+    EXPOSED: "Leaked passwords are loaded into tools that try them on thousands of sites within minutes, and AI makes that "
+             "cheaper still.",
+    REUSED: "One leak from any site unlocks every other site that shares the password: tools try it everywhere automatically.",
+    WEAK: "Guessing tools, now helped by AI trained on leaked passwords, try names, words and patterns first: a weak password "
+          "falls in seconds.",
+    OLD: "A password unchanged for years has had years to leak in a breach nobody heard about.",
+    DUPLICATE: "Old copies keep an old password alive after it is changed, and AutoFill may offer the stale one.",
+    TWOFA: "Without a second step, a stolen or guessed password is all an attacker needs, and phishing kits now automate "
+           "the login.",
+    AUTOFILL: "When AutoFill does not offer a login, it is easier to type the password into a fake page that looks like the real one.",
+}
+
+
+def render_summary(rep: Report, today: str, user: str) -> str:
+    """Counts by kind of site only: no site, username, host, item id or link."""
+    m = model_of(rep)
+    risks = []
+    for tier, name in TIER_NAMES.items():
+        here = [s for s in m.to_fix if s.tier == tier]
+        if here:
+            what = ", ".join(f"{n} {CHIP_WORDS[p].lower()}" for p in SEVERITY if (n := sum(1 for s in here if p in s.problems)))
+            risks.append(f"<li><strong>{esc(name)}:</strong> {plural(len(here), 'site needs', 'sites need')} work ({what}).</li>")
+    how = "".join(f"<li>{chip(p)} {HOW_USED[p]}</li>" for p in SEVERITY if m.with_problem(p))
+    whose = f" for {esc(user)}" if user else ""
+    body = (f'<header><h1>Bitwarden summary{whose}</h1><p class="date">Check-up of {esc(today)}. Counts only: no site, username '
+            f'or password is on this page.</p></header>{dashboard(m, for_summary=True)}'
+            f'<section class="card"><h2>Top risks, by kind of site</h2>'
+            f'{"<ul>" + "".join(risks) + "</ul>" if risks else "<p>Nothing found.</p>"}</section>'
+            f'<section class="card"><h2>How an attacker or AI tool would use this</h2>'
+            f'{"<ul class=how>" + how + "</ul>" if how else "<p>Nothing found.</p>"}</section>'
+            '<footer class="muted">Made by the bw-health check-up. The passwords were checked on this computer and never shown.</footer>')
+    return page(f"Bitwarden summary{whose}", body, "")
+
+
+# --- the page ---------------------------------------------------------------------------------------------
+
+TOOLS = ('<div id="tools" class="tools" hidden><label>Filter <input id="filter" type="search" placeholder="site or account"></label>'
+         '<label><input id="hide-done" type="checkbox"> Hide done</label></div>')
+
+STYLE = """
+:root{--bg:#fbfbfa;--card:#fff;--ink:#1b1b1b;--muted:#5d5d5d;--line:#d9d9d6;--track:#e6e6e3;
+--red:#b3261e;--red-bg:#fde7e5;--orange:#a84f00;--orange-bg:#ffe9d6;--amber:#7d5b00;--amber-bg:#fff4cc;
+--gray:#4f5359;--gray-bg:#eceef0;--blue:#1d5fb4;--blue-bg:#e3eefc;--purple:#6b3fa0;--purple-bg:#efe6fa;
+--brown:#6d4c33;--brown-bg:#f1e8e0;--green:#2e6b30;--tier:#5d6168}
+@media (prefers-color-scheme:dark){:root{--bg:#161616;--card:#1f1f1f;--ink:#ececec;--muted:#a9a9a9;--line:#3a3a3a;--track:#333;
+--red:#ff9a91;--red-bg:#4a1d1a;--orange:#ffb36b;--orange-bg:#47290c;--amber:#f2cf5b;--amber-bg:#3f3407;
+--gray:#c4c8cd;--gray-bg:#2f3236;--blue:#8fbaf5;--blue-bg:#16304f;--purple:#cfa8f7;--purple-bg:#352349;
+--brown:#dbb89a;--brown-bg:#3a2a1e;--green:#8fd18f;--tier:#b4b8bd}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
+main{max-width:1100px;margin:0 auto;padding:24px 16px 48px}
+h1{font-size:1.7rem;margin:0}h2{font-size:1.2rem;margin:0 0 .5rem}h3{font-size:1rem;margin:0 0 .5rem}
+p{margin:.4rem 0}.muted{color:var(--muted)}.date{color:var(--muted);margin:.1rem 0 .4rem}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;margin:16px 0}
+.card.empty{padding:10px 16px}
+.dash{display:flex;gap:24px;align-items:center;flex-wrap:wrap;margin:16px 0}
+.lead{flex:1 1 300px}.headline{font-size:1.05rem}
+.ring{margin:0 auto;text-align:center}.ring figcaption{font-size:.8rem;color:var(--muted);display:flex;flex-direction:column}
+.ring-fine{stroke:var(--track)}.ring-work{stroke:var(--orange)}
+.ring-num{font-size:30px;font-weight:700;fill:var(--ink)}.ring-of{font-size:9px;fill:var(--muted)}
+.key-work .i{color:var(--orange)}.key-fine .i{color:var(--green)}
+.scores{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
+.score{background:var(--card);border:1px solid var(--line);border-left:6px solid var(--gray);border-radius:8px;padding:10px 12px;display:flex;flex-direction:column}
+.score .num{font-size:1.7rem;font-weight:700;line-height:1.2}.score .what{font-weight:600}.score .sub{font-size:.8rem;color:var(--muted)}
+.s-urgent{border-left-color:var(--red)}.s-soon{border-left-color:var(--orange)}.s-check{border-left-color:var(--blue)}
+.s-tidy{border-left-color:var(--purple)}.s-ok{border-left-color:var(--green)}.s-total{border-left-color:var(--tier)}
+.lvl{font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.04em;display:inline-flex;gap:4px;align-items:center}
+.lvl-urgent{color:var(--red)}.lvl-soon{color:var(--orange)}.lvl-check{color:var(--blue)}.lvl-tidy{color:var(--purple)}
+.lvl-ok{color:var(--green)}.lvl-total{color:var(--muted)}
+.charts{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px;margin:16px 0}
+.bars{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+.bar{display:grid;grid-template-columns:minmax(110px,45%) 1fr 2.5em;gap:8px;align-items:center;margin:4px 0;font-size:.9rem}
+.bl{display:inline-flex;gap:5px;align-items:center}.bn{text-align:right;font-variant-numeric:tabular-nums}
+.track{background:var(--track);border-radius:4px;height:12px;display:block;overflow:hidden}
+.meter{background:var(--track);border-radius:4px;display:inline-block;width:90px;height:10px;vertical-align:middle;overflow:hidden}
+.fill,.mfill{display:block;height:100%}
+.f-exposed{background:var(--red)}.f-reused{background:var(--orange)}.f-weak{background:var(--amber)}.f-old{background:var(--brown)}
+.f-duplicate{background:var(--gray)}.f-two-step{background:var(--blue)}.f-autofill{background:var(--purple)}.f-tier{background:var(--tier)}
+.bl .i{color:var(--ink)}
+.chip{display:inline-flex;align-items:center;gap:4px;font-size:.78rem;font-weight:600;padding:1px 7px;border-radius:999px;border:1px solid;white-space:nowrap;margin:1px 0}
+.c-exposed{color:var(--red);background:var(--red-bg)}.c-reused{color:var(--orange);background:var(--orange-bg)}
+.c-weak{color:var(--amber);background:var(--amber-bg)}.c-old{color:var(--brown);background:var(--brown-bg)}
+.c-duplicate{color:var(--gray);background:var(--gray-bg)}.c-two-step{color:var(--blue);background:var(--blue-bg)}
+.c-autofill{color:var(--purple);background:var(--purple-bg)}.c-new{color:var(--ink);background:var(--card);border-style:dashed}
+.i{flex:none;vertical-align:-1px}a.v .i{margin-left:3px;color:var(--muted)}
+a{color:var(--blue)}a.v{color:inherit;text-decoration:none}a.v:hover,a.v:focus{text-decoration:underline}
+.help{font-weight:600;margin:16px 0 0}
+.scroll{overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:.92rem}
+th,td{border-bottom:1px solid var(--line);padding:6px 8px;text-align:left;vertical-align:top}
+th{font-size:.8rem;text-transform:uppercase;letter-spacing:.03em;color:var(--muted)}
+th button.sort{all:unset;cursor:pointer}th[aria-sort=ascending] button::after{content:" ▲"}th[aria-sort=descending] button::after{content:" ▼"}
+tr.done td{text-decoration:line-through;opacity:.6}tr.done td.done-col{text-decoration:none;opacity:1}
+details summary{cursor:pointer}ul.hosts{margin:.3rem 0;padding-left:1.1rem;font-size:.85rem}
+ol.first{margin:.3rem 0;padding-left:1.4rem}ol.first li{margin:.25rem 0}
+.strength{display:inline-flex;gap:2px;vertical-align:middle}.seg{width:14px;height:10px;border:1px solid var(--amber);border-radius:2px}
+.seg.on{background:var(--amber)}
+.tools{display:flex;gap:16px;flex-wrap:wrap;align-items:center;margin:12px 0}.tools input[type=search]{font:inherit;padding:4px 8px}
+code{font-size:.85rem;background:var(--track);padding:1px 4px;border-radius:4px;word-break:break-all}
+ul.how{padding-left:0;list-style:none}ul.how li{margin:.5rem 0}
+footer{margin-top:24px;font-size:.85rem}
+@media print{body{background:#fff;color:#000}.tools,.done-col{display:none!important}.card,.score,.bars{break-inside:avoid}
+a.v .i{display:none}main{padding:0}}
+"""
+
+SCRIPT = """
+(function(){
+  var KEY='bw-health-done', done={};
+  try{ done=JSON.parse(localStorage.getItem(KEY)||'{}')||{}; }catch(e){ done={}; }
+  function save(){ try{ localStorage.setItem(KEY, JSON.stringify(done)); }catch(e){} }
+  var tools=document.getElementById('tools'), filter=document.getElementById('filter'), hide=document.getElementById('hide-done');
+  tools.hidden=false;
+  var rows=[].slice.call(document.querySelectorAll('tr[data-ids]'));
+  function ids(tr){ return tr.getAttribute('data-ids').split(' ').filter(Boolean); }
+  function isDone(tr){ return ids(tr).some(function(i){ return done[i]; }); }
+  function refresh(){
+    var q=filter.value.trim().toLowerCase();
+    rows.forEach(function(tr){
+      var d=isDone(tr), cb=tr.querySelector('input.done-box');
+      tr.classList.toggle('done', d); if(cb) cb.checked=d;
+      tr.hidden=(hide.checked && d) || (q!=='' && tr.textContent.toLowerCase().indexOf(q)<0);
+    });
+  }
+  function key(td){ var v=td.getAttribute('data-sort'); if(v===null) v=td.textContent.trim().toLowerCase();
+    return (v!=='' && !isNaN(v)) ? Number(v) : v; }
+  [].forEach.call(document.querySelectorAll('table.list'), function(t){
+    var hr=t.tHead.rows[0], th=document.createElement('th');
+    th.textContent='Done'; th.className='done-col'; hr.insertBefore(th, hr.firstChild);
+    [].forEach.call(t.tBodies[0].rows, function(tr){
+      var td=document.createElement('td'); td.className='done-col';
+      if(tr.hasAttribute('data-ids')){
+        var cb=document.createElement('input'); cb.type='checkbox'; cb.className='done-box'; cb.setAttribute('aria-label','Mark done');
+        cb.addEventListener('change', function(){ ids(tr).forEach(function(i){ if(cb.checked) done[i]=1; else delete done[i]; }); save(); refresh(); });
+        td.appendChild(cb);
+      }
+      tr.insertBefore(td, tr.firstChild);
+    });
+    [].forEach.call(hr.cells, function(cell, idx){
+      if(cell.className==='done-col') return;
+      var b=document.createElement('button'); b.type='button'; b.className='sort'; b.textContent=cell.textContent;
+      cell.textContent=''; cell.appendChild(b);
+      b.addEventListener('click', function(){
+        var asc=cell.getAttribute('aria-sort')!=='ascending', body=t.tBodies[0], list=[].slice.call(body.rows);
+        [].forEach.call(hr.cells, function(c){ c.removeAttribute('aria-sort'); });
+        cell.setAttribute('aria-sort', asc?'ascending':'descending');
+        list.sort(function(a,b){ var x=key(a.cells[idx]), y=key(b.cells[idx]);
+          if(typeof x!==typeof y){ x=String(x); y=String(y); } return (x<y?-1:x>y?1:0)*(asc?1:-1); });
+        list.forEach(function(r){ body.appendChild(r); });
+      });
+    });
+  });
+  filter.addEventListener('input', refresh); hide.addEventListener('change', refresh);
+  window.addEventListener('beforeprint', function(){ [].forEach.call(document.querySelectorAll('details'), function(d){ d.open=true; }); });
+  refresh();
+})();
 """
 
 
-def inline(text: str) -> str:
-    text = html.escape(text, quote=False)
-    text = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", text)
-    text = re.sub(r"\[([^\]\[]+)\]\((https?://[^\s()\"]+)\)", r'<a href="\2" rel="noreferrer noopener">\1</a>', text)
-    return re.sub(r"(?<!\w)_(.+?)_(?!\w)", r"<em>\1</em>", text)
+def page(title: str, body: str, script: str) -> str:
+    """One self-contained page: no external script, style, font or image."""
+    js = f"<script>{script}</script>" if script else ""
+    return (f'<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">'
+            f'<meta name="referrer" content="no-referrer"><title>{esc(title)}</title><style>{STYLE}</style></head>'
+            f'<body><main>{body}</main>{js}</body></html>')
 
 
-def to_html(md: str) -> str:
-    """The subset of Markdown this report emits: headings, pipe tables, bullets, bold, italics, links."""
-    out, table, in_list = [HTML_HEAD], [], False
-
-    def flush_table() -> None:
-        if not table:
-            return
-        head, body = table[0], table[2:]
-        out.append("<table><tr>" + "".join(f"<th>{inline(c)}</th>" for c in head) + "</tr>")
-        out.extend("<tr>" + "".join(f"<td>{inline(c)}</td>" for c in row) + "</tr>" for row in body)
-        out.append("</table>")
-        table.clear()
-
-    for line in md.splitlines():
-        if line.startswith("|"):
-            table.append([c.strip() for c in line.strip().strip("|").split("|")])
-            continue
-        flush_table()
-        if line.startswith("- "):
-            if not in_list:
-                out.append("<ul>")
-                in_list = True
-            out.append(f"<li>{inline(line[2:])}</li>")
-            continue
-        if in_list:
-            out.append("</ul>")
-            in_list = False
-        if line.startswith("# "):
-            out.append(f"<h1>{inline(line[2:])}</h1>")
-        elif line.startswith("## "):
-            out.append(f"<h2>{inline(line[3:])}</h2>")
-        elif line.strip():
-            out.append(f"<p>{inline(line)}</p>")
-    flush_table()
-    if in_list:
-        out.append("</ul>")
-    out.append("</body></html>")
-    return "\n".join(out)
+def write_page(path: str, text: str) -> None:
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(text + "\n")
+    os.chmod(path, 0o600)
+    print(f"wrote {path}")
 
 
 def main() -> None:
@@ -720,8 +1177,11 @@ def main() -> None:
     ap.add_argument("--input", help="JSON array from `bw list items` (file path or - for stdin) instead of calling bw")
     ap.add_argument("--folders", help="with --input: JSON array from `bw list folders`, for the folder lines of the fix order")
     ap.add_argument("--vault-url", default=DEFAULT_VAULT_URL, help="with --input: the web vault the links open (bw's server otherwise)")
-    ap.add_argument("--out", help="write the report here instead of stdout")
-    ap.add_argument("--html", action="store_true", help="emit HTML instead of Markdown")
+    ap.add_argument("--out", help="write the HTML report here instead of stdout")
+    ap.add_argument("--summary", help="also write the shareable summary (counts only) here")
+    ap.add_argument("--summary-only", action="store_true", help="write only the summary: no report, and the progress file is not touched")
+    ap.add_argument("--paste-line", default="", help="the pinned paste line, so the report can show the exact commands to run")
+    ap.add_argument("--user", default="", help="the --user profile name, for the commands shown and the summary's title")
     ap.add_argument("--no-hibp", action="store_true", help="skip the Have I Been Pwned breach check")
     ap.add_argument("--no-twofa", action="store_true", help="skip the two-step login check")
     ap.add_argument("--twofa-file", help="a saved copy of the 2FA Directory list (v4 all.json) instead of downloading it")
@@ -730,8 +1190,15 @@ def main() -> None:
                     help="the fix-order list (default: fix_order.txt beside this script)")
     ap.add_argument("--state", help="progress file: compared with the last check-up, then rewritten (item ids and reasons only)")
     args = ap.parse_args()
+    if args.summary_only and (not args.summary or args.out or args.state):
+        sys.exit("--summary-only needs --summary, and takes no --out or --state: it writes the summary and nothing else")
+    if args.paste_line and not SAFE_PASTE_LINE.fullmatch(args.paste_line):
+        sys.exit("--paste-line is not a bw-health paste line pinned to a version")
+    if args.user and not SAFE_USER.fullmatch(args.user):
+        sys.exit("--user is 1 to 32 lowercase letters, digits or hyphens")
 
     order = load_fix_order(Path(args.fix_order))
+    dd.suffix_list()  # read before the vault, so a missing or cut-off list stops the run first
     items, folders, vault_url = load_vault(args)
     if args.no_twofa:
         twofa, skipped = None, "--no-twofa"
@@ -740,15 +1207,15 @@ def main() -> None:
     now = datetime.now(timezone.utc)
     today = f"{now.astimezone():%Y-%m-%d}"
     rep = build(items, order, folders, not args.no_hibp, twofa, skipped, now)
+    if args.summary:
+        write_page(args.summary, render_summary(rep, today, args.user))
+    if args.summary_only:
+        return
     state = Path(args.state) if args.state else None
     progress = compare(read_state(state) if state else None, rep)
-    report = render(rep, progress, vault_url, today)
-    if args.html:
-        report = to_html(report)
+    report = render(rep, progress, vault_url, today, args.paste_line, args.user)
     if args.out:
-        with open(args.out, "w", encoding="utf-8") as fh:
-            fh.write(report + "\n")
-        print(f"wrote {args.out}")
+        write_page(args.out, report)
     else:
         print(report)
     if state:
