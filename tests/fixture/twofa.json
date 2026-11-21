@@ -1,0 +1,8 @@
+{
+  "chase.com": {"methods": ["sms", "call"]},
+  "appleid.apple.com": {"methods": ["sms", "u2f"]},
+  "drive.google.com": {"methods": ["totp"]},
+  "gmail.com": {"methods": ["totp"]},
+  "login.example.io": {"methods": ["totp"], "documentation": "https://example.io/help/2fa"},
+  "plain.example.com": {}
+}

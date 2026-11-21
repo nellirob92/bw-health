@@ -17,23 +17,36 @@ can tidy duplicate entries. It works on the free Bitwarden plan.
 Open Terminal (press Command-Space, type `Terminal`, press Return), paste this line, press Return:
 
 ```
-curl -fsSL https://raw.githubusercontent.com/nellirob92/bw-health/main/bw-health.sh | bash
+curl -fsSL https://raw.githubusercontent.com/nellirob92/bw-health/v1.0.0/bw-health.sh | bash
 ```
 
 It asks for your Bitwarden email (the first time only), your master password, and the two-step code if
-Bitwarden asks for one. Nothing shows on the screen while you type the password. It then opens a report
-called `Bitwarden Report.html` on your Desktop.
+Bitwarden asks for one. Nothing shows on the screen while you type the password. It then opens the report
+in your browser.
 
 **This check only reads your vault.** It never merges, deletes or changes anything, and no password is
 ever shown. It locks your vault again when it finishes.
 
 | The report lists | Meaning |
 | --- | --- |
+| Fixed since last time | From the second run on: how many flagged items were fixed, how many are left, and which are new. |
+| Fix in this order | Email and Apple, Google and Microsoft accounts first, then money, then phone, utilities, insurance and health, then gaming and social, then everything else. Each login has links to its change-password page, its site and its Bitwarden entry. |
 | Exposed in a breach | The password appears in public breach lists. Only the first 5 characters of its SHA-1 hash leave your Mac (Have I Been Pwned's range check). |
 | Reused | The same password is used on more than one account. |
 | Weak | The password is short or predictable. |
 | Duplicate entries | The same site and username is saved more than once. |
-| Fix in this order | Email, Apple and Google accounts first, then money, then gaming and social, then everything else. |
+| Two-step login | The site offers two-step login and no code is saved in the entry. Check that it is turned on at the site: the entry cannot show that. |
+| AutoFill problems | The entry has no web address, or only an `http://` one, so iPhone AutoFill will not offer it reliably. |
+| Unchanged for 3+ years | The password has not changed in three years. Importing resets these dates, so this only means something on later runs. |
+| Notes that may hold a password | A note with a line like `password: ...`. Only the item's name is shown, never the note. |
+| Your Bitwarden account | Links to check that your Bitwarden email is verified and two-step login is on. The check-up cannot see either. |
+
+**Where the report is kept.** Each run saves a dated report in
+`~/Library/Application Support/bw-health/Reports` and opens it from there. It is never put on the Desktop,
+in Documents or in iCloud. The newest 10 are kept; older ones are removed, and the run says how many.
+
+**Paste line from before version 1.0.0?** It still works and now shows the line above, which always runs
+exactly the version it names.
 
 ## Move your old passwords in
 
@@ -58,12 +71,12 @@ To check several people's vaults from one Mac account, one after another, give e
 `--user`. Add the words after `bash -s --` on the paste line:
 
 ```
-curl -fsSL https://raw.githubusercontent.com/nellirob92/bw-health/main/bw-health.sh | bash -s -- --user mom
+curl -fsSL https://raw.githubusercontent.com/nellirob92/bw-health/v1.0.0/bw-health.sh | bash -s -- --user mom
 ```
 
 | Add this | What happens |
 | --- | --- |
-| `--user mom` | The check-up for mom, with her own Bitwarden sign-in, import folder, dedupe plan and report (`Bitwarden Report - mom.html`). The name is lowercase letters, digits and hyphens. |
+| `--user mom` | The check-up for mom, with her own Bitwarden sign-in, import folder, dedupe plan and reports. The name is lowercase letters, digits and hyphens. |
 | `--user mom dedupe merge` | Any other step, for mom. |
 | `--user mom logout` | Signs mom out of Bitwarden on this Mac. |
 | `--user mom --logout-after` | Signs mom out when the run ends. |
@@ -75,7 +88,8 @@ curl -fsSL https://raw.githubusercontent.com/nellirob92/bw-health/main/bw-health
   owner's run is done.
 - The Passwords app on the Mac holds the passwords of the Mac's own Apple Account. For someone else,
   export on their own Mac and AirDrop the file over.
-- Without `--user`, nothing changes: one shared sign-in, the same folders and `Bitwarden Report.html`.
+- Each person's reports and progress are kept in their own folder under `profiles`, apart from everyone else's.
+- Without `--user`, nothing changes: one shared sign-in and the shared folders.
 
 ## Clean up duplicates
 
@@ -86,7 +100,7 @@ changes your vault when you add `apply` and then type `DEDUPE` after reading the
 Add the words after `bash -s --` on the paste line, for example:
 
 ```
-curl -fsSL https://raw.githubusercontent.com/nellirob92/bw-health/main/bw-health.sh | bash -s -- dedupe merge
+curl -fsSL https://raw.githubusercontent.com/nellirob92/bw-health/v1.0.0/bw-health.sh | bash -s -- dedupe merge
 ```
 
 | Add this | What happens |
@@ -136,27 +150,47 @@ A plan listing every group (names and counts, never a password) is written to
 
 - The check-up and the previews only read your vault. Only `dedupe ... apply` changes it, after a typed
   confirmation.
-- No password is printed, logged or written to a plan file. The breach check sends only a 5-character hash
-  prefix.
-- Plain-text exports are kept out of the Desktop and iCloud, and you are told to trash them when done.
+- No password, and no text from a note, is printed, logged or written to any file.
+- Two things are fetched from the internet during the check-up, and neither names a site, a username or
+  you: the breach check sends only a 5-character hash prefix, and the two-step check downloads the whole
+  public [2FA Directory](https://2fa.directory/) list (kept for a day) and compares it on your Mac.
+- No site in your vault is ever contacted. The links in the report are built from the address you saved.
+- To show what was fixed since last time, a small file next to the reports keeps each flagged item's
+  Bitwarden id and the reason it was flagged. It holds no name, site, username or password.
+- Reports and plain-text exports are kept out of the Desktop and iCloud, and you are told to trash the
+  exports when done.
 - Nothing is installed system-wide and no administrator password is needed. The Bitwarden command-line app
   is downloaded at a pinned version and its SHA-256 checksum is verified before it is used.
+- The paste line names a released version. The files it fetches come from that release, and each is used
+  only if its SHA-256 checksum matches the one written in the script.
 
 ## For maintainers
 
 | File | Role |
 | --- | --- |
 | `bw-health.sh` | Entry point and installer (runs under the Mac's bash 3.2): installs uv and the pinned Bitwarden CLI, signs in once, runs the report, stages exports, or starts a dedupe step. |
-| `bw_report.py` | The health report (exposed, reused, weak, duplicate). Read-only. |
+| `bw_report.py` | The health report: every check in the table above, the links and the progress line. Read-only. |
+| `fix_order.txt` | Which sites and Bitwarden folders are fixed first. One `tier domain` or `tier folder: name` per line; edit it to add a site. |
 | `bw_import_diff.py` | Compares Chrome and Apple exports with the vault and writes the import csv and `conflicts.md`. Read-only. |
 | `bw_dedupe.py` | Duplicate cleanup: the only code that edits or trashes vault items. |
 | `tests/run.sh` | End-to-end tests with a stand-in `bw`; fixtures are in `tests/fixture`. |
 
 - **Tests:** `bash tests/run.sh` on a Mac (needs `uv` and a network connection). CI runs it on a macOS
   runner for every push.
-- **A merge to `main` is a release:** the paste line fetches the scripts from `main` on every run.
-- **Trying a branch before it is merged:** run `bash bw-health.sh` from a checkout. Run as a file with the
-  three Python scripts beside it, it uses those and says so. `BW_HEALTH_BASE_URL` still overrides that.
+- **A release is a tag.** `bw-health.sh` names its `VERSION`, fetches its files from the tag `vVERSION`,
+  and uses each only if it matches the SHA-256 written in `pinned_sha256`. Nothing is fetched from `main`.
+- **Cutting a release:**
+  1. Raise `VERSION` in `bw-health.sh` and the version in this README's paste lines.
+  2. Run `bash tests/run.sh`. If a fetched file changed, it fails and prints the checksum line to paste
+     into `pinned_sha256`. Run it again until it passes.
+  3. Merge to `main`, then tag that merge commit and push the tag: `git tag vX.Y.Z <commit>` and
+     `git push origin vX.Y.Z`. Until the tag is pushed, a paste line that still points at `main` cannot
+     fetch its files, so push it straight away.
+  4. A tagged version never changes: once `vX.Y.Z` exists, the tests fail if `bw-health.sh` or a fetched
+     file differs from it without a new `VERSION`.
+- **Trying a branch before it is released:** run `bash bw-health.sh` from a checkout. Run as a file with
+  its four files beside it, it uses those and says so; they are checked against the same checksums, so
+  update a changed file's checksum first. `BW_HEALTH_BASE_URL` still overrides the source.
 - **Bumping the Bitwarden CLI:** edit the version and the two SHA-256 values at the top of `bw-health.sh`,
   taking them from the digests of the `cli-v<version>` release assets.
 - **What the tests cannot show:** how the real `bw` behaves. A new `bw` command or a change to a vault write

@@ -14,26 +14,26 @@ expect() { # expect <file> <regex> <description>
 }
 
 # --- report: markdown, offline -------------------------------------------------------------
-uv run --quiet bw_report.py --input "$FX/items.json" --no-hibp --out "$WORK/report.md"
+uv run --quiet bw_report.py --input "$FX/items.json" --no-hibp --no-twofa --out "$WORK/report.md"
 expect "$WORK/report.md" '^\| Logins with a password \| 5 \|' "report counts live logins"
 expect "$WORK/report.md" '^\| In trash \(ignored, empty it\) \| 1 \|' "report excludes trash"
 expect "$WORK/report.md" '^\| Reused \(accounts sharing a password\) \| 3 \|' "report counts reused logins"
 expect "$WORK/report.md" 'Password group 1: used 3 times' "report shows reuse count"
 expect "$WORK/report.md" '^\| Weak \| 4 \|' "report counts weak"
 expect "$WORK/report.md" '^\| Duplicate entries \(same site \+ username\) \| 2 \|' "report counts duplicates"
-expect "$WORK/report.md" '^\| 1 - email / Apple / Google \| Gmail' "report ranks email first"
-expect "$WORK/report.md" '^\| 4 - everything else \| Netflix' "report does not match x.com inside netflix.com"
+expect "$WORK/report.md" '^\| 1 - email, Apple, Google, Microsoft \| Gmail' "report ranks email first"
+expect "$WORK/report.md" '^\| 5 - everything else \| Netflix' "report does not match x.com inside netflix.com"
 expect "$WORK/report.md" 'not checked \(--no-hibp\)' "report marks breach check skipped"
 ! grep -q 'password123' "$WORK/report.md" || { echo "FAIL a password leaked into the report"; exit 1; }
 pass "report never prints a password"
 
 # --- report: breach check against Have I Been Pwned ---------------------------------------
-uv run --quiet bw_report.py --input "$FX/items.json" --out "$WORK/report-hibp.md"
+uv run --quiet bw_report.py --input "$FX/items.json" --no-twofa --out "$WORK/report-hibp.md"
 expect "$WORK/report-hibp.md" '^\| Exposed in a breach \| 4 \|' "breach check flags the known-breached passwords"
 expect "$WORK/report-hibp.md" '^\| Gmail \(mom@gmail.com\) - accounts.google.com \| [0-9,]+ \|' "breach table has a count"
 
 # --- report: html -------------------------------------------------------------------------
-uv run --quiet bw_report.py --input "$FX/items.json" --no-hibp --html --out "$WORK/report.html"
+uv run --quiet bw_report.py --input "$FX/items.json" --no-hibp --no-twofa --html --out "$WORK/report.html"
 expect "$WORK/report.html" '<strong>Logins that need a new password</strong>' "html converts bold"
 expect "$WORK/report.html" '<h2>Reused passwords</h2>' "html converts headings"
 expect "$WORK/report.html" '<li>Roblox \(kiddo\) - roblox.com</li>' "html converts bullets"
@@ -47,15 +47,17 @@ mkdir "$WORK/fakebin"
 cat >"$WORK/fakebin/bw" <<EOF
 #!/bin/bash
 case "\$#:\$1:\$2" in
-  1:status:) echo '{"status":"unlocked"}' ;;
+  1:status:) echo '{"status":"unlocked","serverUrl":"https://vault.bitwarden.eu"}' ;;
   1:sync:) echo 'Syncing complete.' ;;
   2:list:items) cat "$FX/items.json" ;;
+  2:list:folders) cat "$FX/folders.json" ;;
   *) echo "Invalid command: \$*" >&2; exit 1 ;;
 esac
 EOF
 chmod +x "$WORK/fakebin/bw"
-PATH="$WORK/fakebin:$PATH" BW_SESSION=fake uv run --quiet bw_report.py --no-hibp --out "$WORK/report-live.md"
+PATH="$WORK/fakebin:$PATH" BW_SESSION=fake uv run --quiet bw_report.py --no-hibp --no-twofa --out "$WORK/report-live.md"
 expect "$WORK/report-live.md" '^\| Logins with a password \| 5 \|' "live path reads the vault through bw list items"
+expect "$WORK/report-live.md" '\[Open in Bitwarden\]\(https://vault.bitwarden.eu/#/vault\?itemId=1\)' "live path links to the web vault of the server bw reports (EU here)"
 
 # --- report: password shapes a real vault has and the fixture lacks -----------------------
 # A 200-character password (zxcvbn refuses anything over 72) and a non-ASCII one. Pins that the
@@ -65,7 +67,7 @@ LONG_PW="$(printf 'Qx7!mZ2@%.0s' $(seq 1 25))"
   {"id":"90","type":1,"name":"Long","deletedDate":null,"login":{"username":"a@b.com","password":$long,"uris":[{"uri":"https://long.example.com"}]}},
   {"id":"91","type":1,"name":"Unicode","deletedDate":null,"login":{"username":"c@d.com","password":"pässwörd-日本語-🔑","uris":[{"uri":"https://uni.example.com"}]}}
 ]' "$FX/items.json" >"$WORK/items-shapes.json"
-uv run --quiet bw_report.py --input "$WORK/items-shapes.json" --no-hibp --out "$WORK/report-shapes.md"
+uv run --quiet bw_report.py --input "$WORK/items-shapes.json" --no-hibp --no-twofa --out "$WORK/report-shapes.md"
 expect "$WORK/report-shapes.md" '^\| Logins with a password \| 7 \|' "a 200-character and a non-ASCII password are scored, not fatal"
 
 # --- report: a copy of the same account is not reuse --------------------------------------
@@ -76,9 +78,119 @@ expect "$WORK/report-shapes.md" '^\| Logins with a password \| 7 \|' "a 200-char
   {"id":"92","type":1,"name":"Gmail copy","deletedDate":null,"login":{"username":"mom@gmail.com","password":"password123","uris":[{"uri":"https://accounts.google.com"}]}},
   {"id":"93","type":1,"name":"Chase copy","deletedDate":null,"login":{"username":"mom","password":"Xk9#mPq2$vL7nR4wZ!t8","uris":[{"uri":"https://chase.com"}]}}
 ]' "$FX/items.json" >"$WORK/items-copies.json"
-uv run --quiet bw_report.py --input "$WORK/items-copies.json" --no-hibp --out "$WORK/report-copies.md"
+uv run --quiet bw_report.py --input "$WORK/items-copies.json" --no-hibp --no-twofa --out "$WORK/report-copies.md"
 expect "$WORK/report-copies.md" '^\| Reused \(accounts sharing a password\) \| 3 \|' "copies of one account do not count as reuse"
 expect "$WORK/report-copies.md" '^\| \*\*Logins that need a new password\*\* \| \*\*3\*\* \|' "the fix list counts accounts (Gmail, Roblox, Netflix), not copies"
+
+# --- report: fix order, two-step, AutoFill, old passwords, notes, links, progress -------------------
+# One fixture vault (tests/fixture/health.json) with an item per case; its one "recent" item gets a
+# creation date ten days back. Runs in UTC so the dates printed are the fixture's own. Cannot catch
+# the real 2FA Directory list, or the real web vault's link format, changing shape.
+H="$WORK/health.json"; R="$WORK/h1.md"
+/usr/bin/jq --arg recent "$(date -u -v-10d +%Y-%m-%dT%H:%M:%SZ)" 'map(if .creationDate == "RECENT" then .creationDate = $recent else . end)' "$FX/health.json" >"$H"
+health() { # health <vault json> <report file> <args...>; what it prints goes to <report file>.log
+  local vault="$1" out="$2"; shift 2
+  TZ=UTC uv run --quiet bw_report.py --input "$vault" --folders "$FX/health-folders.json" --no-hibp --out "$out" "$@" >"$out.log" 2>&1
+}
+section() { sed -n "/^## $1/,/^## /p" "$R"; } # one section of the report, by its heading
+health "$H" "$R" --twofa-file "$FX/twofa.json" --state "$WORK/progress.json" || { cat "$R.log"; echo "FAIL the report on the health fixture"; exit 1; }
+
+# Fix order: a listed domain or an address under it, never a word inside another name; a folder line wins.
+expect "$R" '^\| 2 - money \| Forum \(a\) - forum.example.org \| weak \|' "a folder named in the fix order sets the tier, capitals ignored"
+expect "$R" '^\| 5 - everything else \| Recipes \(cook\) - epicurious.com \| weak \|' "epicurious.com is not a gaming site"
+expect "$R" '^\| 5 - everything else \| Lookalike \(a\) - gmail.example.com \| weak \|' "gmail.example.com is not Gmail"
+expect "$R" '^\| 5 - everything else \| Webmail \(a@example.com\) - mail.example.com \| saved 2020-01-01 \|' "mail.example.com is not an email provider"
+expect "$R" '^\| 1 - email, Apple, Google, Microsoft \| Google \(a@example.com\) - mail.google.com \| last changed 2021-03-03 \|' "an address under a listed domain takes its tier"
+expect "$WORK/report.md" '^\| 4 - gaming and social \| Roblox' "gaming and social is the fourth tier"
+echo '[{"id":"v1","type":1,"name":"Phone","deletedDate":null,"login":{"username":"a","password":"letmein","uris":[{"uri":"https://login.verizon.com"}]}}]' >"$WORK/carrier.json"
+health "$WORK/carrier.json" "$WORK/carrier.md" --no-twofa
+expect "$WORK/carrier.md" '^\| 3 - phone, utilities, insurance, health \| Phone \(a\) - login.verizon.com \|' "a phone carrier is the third tier"
+printf '1 google.com\n2 not a domain\n' >"$WORK/bad-order.txt"
+if health "$H" "$WORK/bad-order.md" --no-twofa --fix-order "$WORK/bad-order.txt"; then echo "FAIL a malformed fix-order line was accepted"; exit 1; fi
+expect "$WORK/bad-order.md.log" "bad-order.txt line 2: 'not a domain' is not a domain like example.com" "a malformed fix-order line is named with its line number"
+printf '1 example.com\n2 example.com\n' >"$WORK/bad-order.txt"
+if health "$H" "$WORK/bad-order.md" --no-twofa --fix-order "$WORK/bad-order.txt"; then echo "FAIL a domain listed in two tiers was accepted"; exit 1; fi
+expect "$WORK/bad-order.md.log" "line 2: 'example.com' is listed twice with different tiers" "a domain listed in two tiers is refused"
+pass "the fix order matches listed domains and folders only"
+
+# Two-step login: matched here against a saved copy of the list. A site counts when the list has it, an
+# address under it, or (through the fix order's domain) another address of the same site.
+expect "$R" '^\| Sites that offer two-step login, no code saved here \| 3 \|' "two-step login counts sites with no code saved"
+expect "$R" "this site offers two-step login; check it's on" "the two-step wording does not claim to know whether it is on"
+section 'Two-step login' >"$WORK/twofa-section.md"
+expect "$WORK/twofa-section.md" '^\| 2 - money \| Chase \(a\) - secure.chase.com \|' "an address under a site on the list is flagged"
+expect "$WORK/twofa-section.md" '^\| 1 - email, Apple, Google, Microsoft \| Apple \(a@example.com\) - idmsa.apple.com \|' "another address of a listed site is flagged through the fix order's domain"
+expect "$WORK/twofa-section.md" '^\| 5 - everything else \| Parent site \(a\) - example.io \|' "a site whose sign-in address is on the list is flagged"
+! grep -q '| Google (a@\|Plain site\|Lookalike\|Webmail' "$WORK/twofa-section.md" || { cat "$WORK/twofa-section.md"; echo "FAIL a login with a code saved, a site with no two-step login, or an unrelated site was flagged"; exit 1; }
+expect "$R" 'Data sourced from \[2FA Directory\]\(https://2fa.directory/\) by 2factorauth' "the list's source is credited, as its licence asks"
+health "$H" "$WORK/h-nolist.md" --twofa-file "$WORK/no-such-list.json" || { cat "$WORK/h-nolist.md.log"; echo "FAIL a missing two-step list stopped the report"; exit 1; }
+expect "$WORK/h-nolist.md" '^\| Sites that offer two-step login, no code saved here \| not checked \(the list of sites could not be downloaded\) \|' "a list that cannot be had shows as not checked, never as zero"
+expect "$WORK/h-nolist.md" '^Not checked this time: the list of sites could not be downloaded\.$' "the two-step section says it was not checked"
+expect "$WORK/h-nolist.md.log" 'The two-step check was skipped' "a skipped two-step check is said on the terminal too"
+# The real download: the whole public list, kept for a day. A fresh copy is used as it is; a stale one is replaced.
+CACHE="$WORK/twofa-cache.json"
+health "$H" "$WORK/h-live.md" --twofa-cache "$CACHE" || { cat "$WORK/h-live.md.log"; echo "FAIL the report with the downloaded list"; exit 1; }
+[ "$(/usr/bin/jq 'type == "object" and length > 1000' "$CACHE")" = "true" ] || { echo "FAIL the downloaded two-step list was not kept, or is not the shape expected"; exit 1; }
+expect "$WORK/h-live.md" '^\| Sites that offer two-step login, no code saved here \| [0-9]+ \|' "the downloaded list is used"
+cp "$FX/twofa.json" "$CACHE"
+health "$H" "$WORK/h-cached.md" --twofa-cache "$CACHE"
+cmp -s "$FX/twofa.json" "$CACHE" || { echo "FAIL a copy of the list younger than a day was downloaded again"; exit 1; }
+expect "$WORK/h-cached.md" '^\| Sites that offer two-step login, no code saved here \| 3 \|' "a fresh kept copy of the list is the one used"
+touch -t "$(date -v-2d +%Y%m%d%H%M)" "$CACHE"
+health "$H" "$WORK/h-stale.md" --twofa-cache "$CACHE"
+! cmp -s "$FX/twofa.json" "$CACHE" || { echo "FAIL a copy of the list older than a day was not replaced"; exit 1; }
+pass "two-step login is matched locally against the whole list, kept for a day"
+
+# AutoFill, old passwords, notes.
+expect "$R" '^\| AutoFill problems \| 2 \|' "AutoFill problems are counted"
+expect "$R" '^\| Garage code \| no web address saved \| \[Open in Bitwarden\]\(https://vault.bitwarden.com/#/vault\?itemId=h7\) \|$' "a login with no address is flagged, with only the Bitwarden link"
+expect "$R" '^\| Router \(admin\) - router.example.lan \| only an http:// address saved \|' "a login with only an http:// address is flagged"
+! section 'AutoFill problems' | grep -q 'Bank app' || { echo "FAIL a login that also has an https:// address was flagged"; exit 1; }
+expect "$R" '^\| Passwords unchanged for 3\+ years \| 2 \|' "old passwords are counted"
+expect "$R" 'Importing passwords resets these dates, so right after an import nothing is old yet' "the report says an import resets the dates"
+expect "$R" '^1 login\(s\) were added in the last 30 days' "a login added in the last 30 days is counted apart"
+! section 'Passwords unchanged' | grep -q 'Recipes' || { echo "FAIL a login added ten days ago was judged old by its password date"; exit 1; }
+expect "$R" '^\| Notes that may hold a password \| 2 \|' "notes that may hold a password are counted"
+expect "$R" '^\| Wifi details \| secure note \| a line that looks like a saved password or PIN \|' "a secure note with a password line is flagged by name and reason"
+expect "$R" '^\| Old forum \| login \| a line shaped like username:password \|' "a login's note with a username:password line is flagged"
+! section 'Notes that may hold' | grep -q 'Shopping list\|Trashed' || { echo "FAIL an ordinary note or a trashed item was flagged"; exit 1; }
+expect "$R" 'cannot see whether your Bitwarden email address is verified, or whether two-step login is turned on' "the report says it cannot check the Bitwarden account itself"
+expect "$R" '^- \[Two-step login\]\(https://vault.bitwarden.com/#/settings/security/two-factor\)' "it links to the two-step setting instead"
+expect "$R" '^- \[Account settings\]\(https://vault.bitwarden.com/#/settings/account\)' "it links to the account page for email verification"
+pass "AutoFill, old passwords, notes and the account pointers are reported"
+
+# Links: built from the saved address and the item id only. Nothing in the vault can add a link of its own.
+expect "$R" '^\| 2 - money \| Forum .* \| \[Change password\]\(https://forum.example.org/.well-known/change-password\), \[Site\]\(https://forum.example.org/\), \[Open in Bitwarden\]\(https://vault.bitwarden.com/#/vault\?itemId=h5\) \|$' "a flagged login links to its change-password page, its site and its Bitwarden entry"
+TZ=UTC uv run --quiet bw_report.py --input "$H" --folders "$FX/health-folders.json" --no-hibp --twofa-file "$FX/twofa.json" --html --vault-url https://bw.example.org:8443/base/ --out "$WORK/h.html" >/dev/null
+expect "$WORK/h.html" '<a href="https://bw.example.org:8443/base/#/vault\?itemId=h5" rel="noreferrer noopener">Open in Bitwarden</a>' "the Bitwarden link uses the account's own server"
+expect "$WORK/h.html" '<a href="https://forum.example.org/.well-known/change-password" rel="noreferrer noopener">Change password</a>' "html turns the links into links"
+! grep -q 'href="https://evil.example' "$WORK/h.html" || { echo "FAIL an item name became a link"; exit 1; }
+! grep -q '\*\*\|^| \|\](http' "$WORK/h.html" || { grep -n '\*\*\|^| \|\](http' "$WORK/h.html" | head -3; echo "FAIL stray markdown in the html"; exit 1; }
+health "$H" "$WORK/h-oddvault.md" --no-twofa --vault-url 'javascript:alert(1)'
+! grep -q 'Open in Bitwarden\|javascript' "$WORK/h-oddvault.md" || { echo "FAIL a server address that is not a plain web address was put in a link"; exit 1; }
+expect "$WORK/h-oddvault.md" 'In the Bitwarden web vault, open Settings, then Security, then Two-step login' "without a usable server address the account pointers are words, not links"
+pass "links come from the saved address, the item id and the server only"
+
+# Progress: the file holds item ids and reason names, nothing else, and the next run compares against it.
+expect "$R" '^\*\*First check-up of this vault on this Mac: 13 flagged\.\*\*' "a first run says so and counts what is flagged"
+P="$WORK/progress.json"
+[ "$(stat -f %Lp "$P")" = "600" ] || { echo "FAIL the progress file is not owner-only"; exit 1; }
+[ "$(/usr/bin/jq -c --slurpfile vault "$H" '[(keys == ["checks","date","flagged","version"]), ((.flagged | keys) - ($vault[0] | map(.id)) == []), ([.flagged[][], .checks[]] | all(IN("exposed","reused","weak","duplicate","two-step","autofill","old","notes"))), (.flagged | length == 13), (.flagged.h5 == ["weak"]), (.checks | index("exposed") == null)]' "$P")" = "[true,true,true,true,true,true]" ] || { cat "$P"; echo "FAIL the progress file must hold item ids and reason names only, and only the checks that ran"; exit 1; }
+! grep -qi 'forum\|example\|chase\|password1\|Hunter2\|jsmith\|Zr8' "$P" || { echo "FAIL a name, site, username or password reached the progress file"; exit 1; }
+# Second run: Forum's password and the Wifi note are fixed; Bank app loses its https:// address.
+/usr/bin/jq 'map(if .id == "h5" then .login.password = "Zr8#kLm2$Qv9xT4w-05" elif .id == "h9" then .notes = "nothing here" elif .id == "h8" then .login.uris = [{"uri":"http://bank.example.com"}] else . end)' "$H" >"$WORK/health2.json"
+health "$WORK/health2.json" "$WORK/h2.md" --twofa-file "$FX/twofa.json" --state "$P"
+expect "$WORK/h2.md" '^\*\*2 fixed since [0-9]{4}-[0-9]{2}-[0-9]{2}, 12 left\.\*\* 1 new since then, marked NEW\.$' "the next run counts what was fixed, what is left and what is new"
+expect "$WORK/h2.md" '^\| Bank app \(a\) - bank.example.com \*\*NEW\*\* \| only an http:// address saved \|' "a newly flagged login is marked NEW"
+[ "$(grep -c 'NEW\*\*' "$WORK/h2.md")" = "1" ] || { grep 'NEW' "$WORK/h2.md"; echo "FAIL a login flagged before was marked NEW"; exit 1; }
+# Third run without the two-step check: the three logins only it flags are neither fixed nor new.
+health "$WORK/health2.json" "$WORK/h3.md" --no-twofa --state "$P"
+expect "$WORK/h3.md" '^\*\*0 fixed since [0-9]{4}-[0-9]{2}-[0-9]{2}, 9 left\.\*\*$' "a check that did not run is not counted as fixed"
+echo '{"flagged": []}' >"$WORK/bad-progress.json"
+if health "$H" "$WORK/h-badstate.md" --no-twofa --state "$WORK/bad-progress.json"; then echo "FAIL a progress file of the wrong shape was accepted"; exit 1; fi
+expect "$WORK/h-badstate.md.log" 'is not a progress file this script wrote' "a progress file of the wrong shape is refused"
+! grep -rq 'Hunter2-note-secret\|Tr0ub4dor-note-pair\|Trashed-note-secret\|HomeNet\|Zr8#kLm2\|password1\|letmein\|monkey12\|qwerty123' "$WORK"/h*.md "$WORK"/h*.log "$WORK/h.html" "$P" || { echo "FAIL a password or a note's text reached a report, the terminal or the progress file"; exit 1; }
+pass "progress is kept as item ids and reasons only; no password or note text is ever written"
 
 # --- import diff --------------------------------------------------------------------------
 uv run --quiet bw_import_diff.py "$FX/chrome.csv" "$FX/apple.csv" "$FX/chrome2.csv" --vault "$FX/items.json" --out-dir "$WORK/import" >/dev/null
@@ -99,7 +211,7 @@ pass "csv holds exactly the 4 new rows, newest export wins a disagreement"
 # --- a malformed URL (an unclosed IPv6 bracket) in a real vault or export must not abort the run ----
 # Pins that the report and the diff complete and count the entry; it cannot catch another shape of bad URL.
 /usr/bin/jq '. + [{"id":"95","type":1,"name":"Bad URL","deletedDate":null,"login":{"username":"bad@x.com","password":"Zq4!rT8#wN2$vB6","uris":[{"uri":"http://[fe80::1"}]}}]' "$FX/items.json" >"$WORK/items-badurl.json"
-uv run --quiet bw_report.py --input "$WORK/items-badurl.json" --no-hibp --out "$WORK/report-badurl.md"
+uv run --quiet bw_report.py --input "$WORK/items-badurl.json" --no-hibp --no-twofa --out "$WORK/report-badurl.md"
 expect "$WORK/report-badurl.md" '^\| Logins with a password \| 6 \|' "the report survives a malformed URL"
 printf 'name,url,username,password,note\nBad URL,http://[fe80::1,bad@x.com,Zq4!rT8#wN2$vB6,\n' >"$WORK/badurl.csv"
 uv run --quiet bw_import_diff.py "$WORK/badurl.csv" --vault "$FX/items.json" --out-dir "$WORK/import-badurl" >/dev/null
@@ -118,8 +230,14 @@ expect "$WORK/install.log" 'Installed OK' "installer completes"
 expect "$WORK/install.log" '^[0-9]{4}\.[0-9]+\.[0-9]+$' "installer prints the bw version"
 expect "$WORK/install.log" '^uv [0-9]' "installer prints the uv version"
 [ -x "$FAKE_HOME/Library/Application Support/bw-health/bin/bw" ] || { echo "FAIL bw not installed"; exit 1; }
-[ -f "$FAKE_HOME/Library/Application Support/bw-health/bw_report.py" ] || { echo "FAIL scripts not fetched"; exit 1; }
-pass "installer put bw and the scripts in the app folder"
+APP="$FAKE_HOME/Library/Application Support/bw-health"
+VERSION="$(sed -n 's/^VERSION="\(.*\)"$/\1/p' bw-health.sh)"; FILES="$(sed -n 's/^FILES="\(.*\)"$/\1/p' bw-health.sh)"
+[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && [ -n "$FILES" ] || { echo "FAIL bw-health.sh must name its VERSION (X.Y.Z) and its FILES"; exit 1; }
+for f in $FILES; do [ -f "$APP/$f" ] || { echo "FAIL $f was not fetched"; exit 1; }; done
+pass "installer put bw and every fetched file in the app folder"
+[ "$(sed -n 2p "$WORK/install.log")" = "==> bw-health v$VERSION. The line that always runs exactly this version:" ] || { head -4 "$WORK/install.log"; echo "FAIL a fetched run must open with its version, before anything is installed"; exit 1; }
+pass "a fetched run opens with its version"
+expect "$WORK/install.log" "^    curl -fsSL https://raw.githubusercontent.com/nellirob92/bw-health/v$VERSION/bw-health.sh \| bash$" "and shows the paste line pinned to that version's tag"
 HOME="$FAKE_HOME" BW_HEALTH_BASE_URL="file://$ROOT" /bin/bash bw-health.sh check >"$WORK/install2.log" 2>&1
 ! grep -q 'Installing' "$WORK/install2.log" || { echo "FAIL second run re-installed"; exit 1; }
 pass "second run skips installs"
@@ -137,6 +255,37 @@ fi
 expect "$WORK/bad-pin.log" 'did not match its checksum' "installer refuses a download that fails its checksum"
 [ ! -e "$BAD_HOME/Library/Application Support/bw-health/bin/bw" ] || { echo "FAIL bw installed despite a bad checksum"; exit 1; }
 pass "nothing is installed when the checksum fails"
+
+# --- releases: every fetched file is pinned by checksum, and a tagged version is frozen ---------------
+for f in $FILES; do
+  sum="$(shasum -a 256 "$f" | cut -d' ' -f1)"
+  grep -qE "^ +$f\) +echo \"$sum\" ;;$" bw-health.sh || { echo "FAIL the checksum of $f written in bw-health.sh is stale. Its line must read:"; echo "    $f) echo \"$sum\" ;;"; exit 1; }
+done
+pass "every fetched file matches the checksum written in bw-health.sh"
+# Asks origin, so a clone without tags (CI) is judged the same way. Cannot catch a tag that was moved.
+tagged=0; git ls-remote --exit-code --tags origin "refs/tags/v$VERSION" >/dev/null 2>&1 || tagged=$?
+case "$tagged" in
+  0)
+    git fetch -q origin "refs/tags/v$VERSION:refs/tags/v$VERSION"
+    # shellcheck disable=SC2086
+    git diff --quiet "v$VERSION" -- bw-health.sh $FILES || { echo "FAIL bw-health.sh or a file it fetches changed after v$VERSION was tagged. Raise VERSION: a released version never changes."; exit 1; }
+    pass "nothing the paste line runs has changed since v$VERSION was tagged" ;;
+  2) pass "v$VERSION is not tagged yet, so it may still change" ;;
+  *) echo "FAIL could not ask origin whether v$VERSION is tagged"; exit 1 ;;
+esac
+# A served file that differs by one line is refused, never installed, and nothing is left half-written.
+for f in bw_dedupe.py fix_order.txt; do
+  rm -rf "$WORK/served"; mkdir "$WORK/served"
+  # shellcheck disable=SC2086
+  cp $FILES "$WORK/served/"; echo '# one line more' >>"$WORK/served/$f"; cp "$APP/$f" "$WORK/installed-before"
+  if HOME="$FAKE_HOME" BW_HEALTH_BASE_URL="file://$WORK/served" /bin/bash bw-health.sh check >"$WORK/tamper.log" 2>&1; then
+    cat "$WORK/tamper.log"; echo "FAIL a changed $f was accepted"; exit 1
+  fi
+  expect "$WORK/tamper.log" "$f did not match the checksum written in bw-health.sh, so it was not used" "a fetched $f that fails its checksum is refused by name"
+  cmp -s "$APP/$f" "$WORK/installed-before" && [ ! -e "$APP/$f.new" ] || { echo "FAIL a $f that failed its checksum was installed or left behind"; exit 1; }
+done
+! grep -q 'bw-health/main' bw-health.sh README.md || { grep -n 'bw-health/main' bw-health.sh README.md; echo "FAIL the tool or its README still points at main"; exit 1; }
+pass "a file that fails its checksum is not used, and nothing points at main"
 
 # --- installer: staging exports from Downloads (run under the Mac's own bash 3.2) ----------
 DL="$FAKE_HOME/Downloads"; IMP="$FAKE_HOME/Library/Application Support/bw-health/Bitwarden Import"; TODAY="$(date +%Y-%m-%d)"
@@ -497,23 +646,30 @@ refuse '--logout-after goes with a run that signs in, not with logout' --user mo
 pass "a bad profile name, option or step is refused before anything is installed"
 
 # --- where the report scripts come from --------------------------------------------------------------
-# A copy of the checkout with a marked script: run as a file with no BW_HEALTH_BASE_URL, it must use
-# the scripts beside it. Cannot catch the published copies being fetched as well and then overwritten.
-APP="$FAKE_HOME/Library/Application Support/bw-health"
-mkdir "$WORK/clone"; cp bw-health.sh bw_*.py "$WORK/clone/"; echo '# marked local copy' >>"$WORK/clone/bw_report.py"
+# A copy of the checkout with a marked script. Run as a file with no BW_HEALTH_BASE_URL it must use the
+# files beside it, and only once the marked file's checksum is written in the copy's own entry script.
+# Cannot catch the published copies being fetched as well and then overwritten.
+# shellcheck disable=SC2086
+mkdir "$WORK/clone" "$WORK/clone2"; cp bw-health.sh $FILES "$WORK/clone/"; cp bw-health.sh $FILES "$WORK/clone2/"
+echo '# marked local copy' >>"$WORK/clone/bw_report.py"
+if env -u BW_HEALTH_BASE_URL HOME="$FAKE_HOME" /bin/bash "$WORK/clone/bw-health.sh" check >"$WORK/local0.log" 2>&1; then echo "FAIL a changed local script was used without its checksum"; exit 1; fi
+expect "$WORK/local0.log" 'bw_report.py did not match the checksum written in bw-health.sh, so it was not used. If you changed it, update its checksum' "a changed script beside the file is refused until its checksum is updated"
+sed -i '' "s/$(shasum -a 256 bw_report.py | cut -d' ' -f1)/$(shasum -a 256 "$WORK/clone/bw_report.py" | cut -d' ' -f1)/" "$WORK/clone/bw-health.sh"
 env -u BW_HEALTH_BASE_URL HOME="$FAKE_HOME" /bin/bash "$WORK/clone/bw-health.sh" check >"$WORK/local.log" 2>&1 || { cat "$WORK/local.log"; echo "FAIL check from a checkout"; exit 1; }
-expect "$WORK/local.log" 'Using the report scripts beside this file' "a run from a checkout says it uses its own scripts"
+expect "$WORK/local.log" "^==> bw-health v$VERSION, using the report scripts beside this file" "a run from a checkout says it uses its own scripts"
+! grep -q 'curl -fsSL' "$WORK/local.log" || { echo "FAIL a run from a checkout showed the paste line as if it were the release"; exit 1; }
 cmp -s "$WORK/clone/bw_report.py" "$APP/bw_report.py" || { echo "FAIL a run from a checkout did not use the script beside it"; exit 1; }
-HOME="$FAKE_HOME" BW_HEALTH_BASE_URL="file://$ROOT" /bin/bash "$WORK/clone/bw-health.sh" check >"$WORK/local2.log" 2>&1 || { cat "$WORK/local2.log"; echo "FAIL check with a base URL"; exit 1; }
-expect "$WORK/local2.log" 'Fetching the report scripts' "BW_HEALTH_BASE_URL still wins over the scripts beside the file"
-cmp -s bw_report.py "$APP/bw_report.py" || { echo "FAIL BW_HEALTH_BASE_URL was not the source"; exit 1; }
+# The unmarked copy, pointed at the marked one: it must fetch from there (and so refuse it), not use its own files.
+if HOME="$FAKE_HOME" BW_HEALTH_BASE_URL="file://$WORK/clone" /bin/bash "$WORK/clone2/bw-health.sh" check >"$WORK/local2.log" 2>&1; then echo "FAIL BW_HEALTH_BASE_URL did not win over the files beside the script"; exit 1; fi
+expect "$WORK/local2.log" 'Fetching the report scripts' "BW_HEALTH_BASE_URL still wins over the files beside the script"
+expect "$WORK/local2.log" 'bw_report.py did not match the checksum' "and what it serves is checked like any other source"
 rm "$WORK/clone/bw_dedupe.py"
 if env -u BW_HEALTH_BASE_URL HOME="$FAKE_HOME" /bin/bash "$WORK/clone/bw-health.sh" check >"$WORK/local3.log" 2>&1; then echo "FAIL a checkout missing a script was accepted"; exit 1; fi
-expect "$WORK/local3.log" 'only some of the report scripts are beside bw-health.sh' "a checkout missing one script is refused, not topped up from the published ones"
+expect "$WORK/local3.log" "only some of this tool's files are beside bw-health.sh" "a checkout missing one file is refused, not topped up from the published ones"
 HOME="$FAKE_HOME" BW_HEALTH_BASE_URL="file://$ROOT" /bin/bash -s -- --user mom check <bw-health.sh >"$WORK/piped.log" 2>&1 || { cat "$WORK/piped.log"; echo "FAIL piped check with --user"; exit 1; }
 expect "$WORK/piped.log" 'Installed OK' "--user works on the paste line (bash -s -- --user NAME)"
 [ -d "$APP/profiles/mom/data" ] || { echo "FAIL a piped --user run did not use the profile's folder"; exit 1; }
-pass "a checkout runs its own scripts; the paste line and BW_HEALTH_BASE_URL fetch them"
+pass "a checkout runs its own files; the paste line and BW_HEALTH_BASE_URL fetch them; every source is checksummed"
 
 # --- several people on one Mac account: --user NAME ---------------------------------------------------
 # A stand-in bw that keeps its sign-in in the data folder it is pointed at, as the real one does, and
@@ -572,6 +728,7 @@ mu() { # mu <account email> <tty file> <args...>: one run from this checkout, wi
     FAKE_OPEN_LOG="$MU_OPENLOG" /bin/bash bw-health.sh "$@"
 }
 snapshot() { ( cd "$1" && find . -type f -exec shasum {} + | sort ); } # every file under a folder, with its hash
+newest_report() { ls "$1/Reports"/*.html | tail -1; }                   # <a person's bw-health folder>
 bw_calls_since() { tail -n "+$(($1 + 1))" "$MU_BWLOG"; }                # <line count before a run>
 
 # Both people's exports are in Downloads at once: the case that used to mix one into the other's vault.
@@ -583,7 +740,7 @@ printf 'url,title\nhttps://x.com,not a password file\n' >"$MU_DL/other.csv"
 # mom, first run: sign in, report, then the list of exports. Three answers that are refused, then file 1.
 printf '4\n1 1\nhunter2\n1\n' >"$WORK/tty-mom"
 mu mom@example.com "$WORK/tty-mom" --user mom >"$WORK/mu1.log" 2>&1 || { cat "$WORK/mu1.log"; echo "FAIL mom's first run"; exit 1; }
-expect "$WORK/mu1.log" 'Using the report scripts beside this file' "a profile run from a checkout uses its own scripts"
+expect "$WORK/mu1.log" 'using the report scripts beside this file' "a profile run from a checkout uses its own scripts"
 expect "$WORK/mu1.log" "Profile mom: sign in to Bitwarden. Type mom's email" "a new profile is asked to sign in"
 expect "$WORK/mu1.log" 'Profile mom: this run uses the vault of mom@example.com' "the run says whose vault the profile holds"
 grep -qx 'profiles/mom/data login --raw' "$MU_BWLOG" || { cat "$MU_BWLOG"; echo "FAIL mom did not sign in to her own data folder"; exit 1; }
@@ -599,13 +756,18 @@ expect "$WORK/mu1.log" '2 other password export file\(s\) are still in Downloads
 [ "$(ls "$MOM/Bitwarden Import" | tr '\n' '|')" = "chrome-passwords-$TODAY.csv|conflicts.md|new-for-bitwarden.csv|" ] || { echo "FAIL mom's import folder must hold her export and its diff, nothing else"; ls "$MOM/Bitwarden Import" || true; exit 1; }
 grep -q 'spotify.com' "$MOM/Bitwarden Import/new-for-bitwarden.csv" && ! grep -q 'library.org' "$MOM/Bitwarden Import/new-for-bitwarden.csv" || { echo "FAIL mom's import file must come from her export only"; exit 1; }
 expect "$WORK/mu1.log" "These files are mom's. Import them only into the vault of mom@example.com" "the import step names the vault the files are for"
-expect "$MU_HOME/Desktop/Bitwarden Report - mom.html" '<td>Logins with a password</td><td>5</td>' "mom's report is her vault, under her name"
-[ "$(tail -1 "$WORK/mu1.log")" = "==> Done. The report is on your Desktop as 'Bitwarden Report - mom.html'. Your vault is locked again." ] || { tail -2 "$WORK/mu1.log"; echo "FAIL the closing line must name the profile's report"; exit 1; }
-[ ! -e "$MU_APP/data" ] && [ ! -e "$MU_APP/Bitwarden Import" ] && [ ! -e "$MU_HOME/Desktop/Bitwarden Report.html" ] || { echo "FAIL a profile run wrote to the shared sign-in, import folder or report"; exit 1; }
+[ "$(ls "$MOM/Reports" | tr '\n' '|' | sed -E 's/[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{6}/STAMP/')" = "Bitwarden Report - mom STAMP.html|progress.json|" ] || { echo "FAIL mom's Reports folder must hold one dated report and the progress file"; ls "$MOM/Reports" || true; exit 1; }
+expect "$(newest_report "$MOM")" '<td>Logins with a password</td><td>5</td>' "mom's report is her vault, in her own Reports folder"
+expect "$(newest_report "$MOM")" '<strong>First check-up of this vault on this Mac: [0-9]+ flagged\.</strong>' "a first report says it is the first"
+[ "$(stat -f %Lp "$MOM/Reports")$(stat -f %Lp "$(newest_report "$MOM")")$(stat -f %Lp "$MOM/Reports/progress.json")" = "700600600" ] || { echo "FAIL the Reports folder, the report and the progress file must be owner-only"; exit 1; }
+[ "$(tail -1 "$WORK/mu1.log")" = "==> Done. The report is open in your browser. It is kept in $MOM/Reports, not on the Desktop. Your vault is locked again." ] || { tail -2 "$WORK/mu1.log"; echo "FAIL the closing line must say where the report is kept"; exit 1; }
+[ ! -e "$MU_APP/data" ] && [ ! -e "$MU_APP/Bitwarden Import" ] && [ ! -e "$MU_APP/Reports" ] && [ -z "$(ls -A "$MU_HOME/Desktop")" ] || { echo "FAIL a profile run wrote to the shared sign-in, import folder or reports, or to the Desktop"; exit 1; }
+[ "$(/usr/bin/jq 'type == "object" and length > 1000' "$MU_APP/2fa-directory.json")" = "true" ] || { echo "FAIL the two-step list was not kept in the shared folder"; exit 1; }
+LIST_STAMP="$(stat -f '%m %i' "$MU_APP/2fa-directory.json")"
 pass "a profile run signs in to its own folder and takes only the export typed for it"
 
 # dad, straight after: his own sign-in, his own folders, and nothing of mom's is read or changed.
-MOM_BEFORE="$(snapshot "$MOM")"; cp "$MU_HOME/Desktop/Bitwarden Report - mom.html" "$WORK/mom-report.html"
+MOM_BEFORE="$(snapshot "$MOM")"
 CALLS="$(wc -l <"$MU_BWLOG")"; : >"$MU_OPENLOG"
 printf '1\n' >"$WORK/tty-dad"
 mu dad@example.com "$WORK/tty-dad" --user dad >"$WORK/mu2.log" 2>&1 || { cat "$WORK/mu2.log"; echo "FAIL dad's first run"; exit 1; }
@@ -616,14 +778,19 @@ bw_calls_since "$CALLS" | grep -qx 'profiles/dad/data login --raw' || { echo "FA
 expect "$WORK/mu2.log" '^  1  Passwords.csv  \(apple, saved' "the export mom left is offered to dad"
 [ "$(ls "$DAD/Bitwarden Import" | tr '\n' '|')" = "apple-passwords-$TODAY.csv|conflicts.md|new-for-bitwarden.csv|" ] || { echo "FAIL dad's import folder must hold his export and its diff"; ls "$DAD/Bitwarden Import" || true; exit 1; }
 grep -q 'library.org' "$DAD/Bitwarden Import/new-for-bitwarden.csv" && ! grep -q 'spotify.com' "$DAD/Bitwarden Import/new-for-bitwarden.csv" || { echo "FAIL dad's import file must come from his export only"; exit 1; }
-expect "$MU_HOME/Desktop/Bitwarden Report - dad.html" '<td>Logins with a password</td><td>1</td>' "dad's report is his vault, under his name"
-[ "$(snapshot "$MOM")" = "$MOM_BEFORE" ] && cmp -s "$MU_HOME/Desktop/Bitwarden Report - mom.html" "$WORK/mom-report.html" || { echo "FAIL dad's run changed mom's folder or report"; exit 1; }
-grep -qxF "$MU_HOME/Desktop/Bitwarden Report - dad.html" "$MU_OPENLOG" && grep -qxF "$DAD/Bitwarden Import" "$MU_OPENLOG" && ! grep -q 'mom' "$MU_OPENLOG" || { cat "$MU_OPENLOG"; echo "FAIL dad's run must open his report and his import folder only"; exit 1; }
+expect "$(newest_report "$DAD")" '<td>Logins with a password</td><td>1</td>' "dad's report is his vault, in his own Reports folder"
+[ "$(snapshot "$MOM")" = "$MOM_BEFORE" ] || { echo "FAIL dad's run changed mom's folder, reports or progress"; exit 1; }
+grep -qxF "$(newest_report "$DAD")" "$MU_OPENLOG" && grep -qxF "$DAD/Bitwarden Import" "$MU_OPENLOG" && ! grep -q 'mom' "$MU_OPENLOG" || { cat "$MU_OPENLOG"; echo "FAIL dad's run must open his report and his import folder only"; exit 1; }
+[ "$(stat -f '%m %i' "$MU_APP/2fa-directory.json")" = "$LIST_STAMP" ] || { echo "FAIL the two-step list was downloaded again within a day"; exit 1; }
 pass "two profiles back to back keep separate sign-ins, import folders and reports"
 
 # mom again: her profile is still signed in, so this is an unlock. --logout-after with a bw that cannot
 # sign out must end in an error and leave her signed in, not claim she is signed out.
 printf 'skip\n' >"$WORK/tty-skip"; printf '\n' >"$WORK/tty-return"
+# Before it: ten older reports, a file that is not a report, and a Desktop report left by an earlier version.
+for d in 01 02 03 04 05 06 07 08 09 10; do echo old >"$MOM/Reports/Bitwarden Report - mom 2020-01-$d 000000.html"; done
+echo keep >"$MOM/Reports/my notes.txt"; echo old >"$MU_HOME/Desktop/Bitwarden Report - mom.html"
+DAD_BEFORE="$(snapshot "$DAD")"
 CALLS="$(wc -l <"$MU_BWLOG")"
 if FAKE_BW_LOGOUT_BUG=fails mu mom@example.com "$WORK/tty-return" --logout-after --user mom >"$WORK/mu3.log" 2>&1; then
   cat "$WORK/mu3.log"; echo "FAIL a run whose sign-out failed ended successfully"; exit 1
@@ -632,7 +799,13 @@ expect "$WORK/mu3.log" 'Profile mom is signed in as mom@example.com. Unlock that
 bw_calls_since "$CALLS" | grep -qx 'profiles/mom/data unlock --raw' && ! bw_calls_since "$CALLS" | grep -q ' login ' || { echo "FAIL a signed-in profile must unlock, not sign in again"; exit 1; }
 expect "$WORK/mu3.log" '^  1  Old Passwords.csv ' "with only an old export left, it is still listed, never taken silently"
 expect "$WORK/mu3.log" 'each file that is mom' "the question names the profile"
-expect "$WORK/mu3.log" "Done. The report is on your Desktop as 'Bitwarden Report - mom.html'" "the run itself finished"
+expect "$WORK/mu3.log" 'Done. The report is open in your browser' "the run itself finished"
+expect "$(newest_report "$MOM")" '<strong>0 fixed since [0-9-]+, [0-9]+ left\.</strong>' "a second report compares with the first"
+expect "$WORK/mu3.log" "Removed 2 older report\(s\) from $MOM/Reports. The newest 10 are kept" "older reports are removed and counted"
+[ "$(ls "$MOM/Reports"/*.html | wc -l | tr -d ' ')" = "10" ] && [ ! -e "$MOM/Reports/Bitwarden Report - mom 2020-01-02 000000.html" ] && [ -e "$MOM/Reports/Bitwarden Report - mom 2020-01-03 000000.html" ] || { ls "$MOM/Reports"; echo "FAIL the newest 10 reports must be kept and the oldest removed"; exit 1; }
+[ -f "$MOM/Reports/my notes.txt" ] && [ -f "$MOM/Reports/progress.json" ] && [ "$(snapshot "$DAD")" = "$DAD_BEFORE" ] || { echo "FAIL clearing old reports touched something that is not one of this person's reports"; exit 1; }
+expect "$WORK/mu3.log" "An older report, 'Bitwarden Report - mom.html', is still on your Desktop" "a Desktop report from an earlier version is pointed out"
+[ -f "$MU_HOME/Desktop/Bitwarden Report - mom.html" ] || { echo "FAIL the old Desktop report was removed without being asked"; exit 1; }
 expect "$WORK/mu3.log" 'Profile mom: Bitwarden could NOT be signed out on this Mac' "a failed sign-out after a finished run is an error"
 [ -f "$MOM/data/account" ] && [ -f "$MU_DL/Old Passwords.csv" ] || { echo "FAIL test setup: mom should still be signed in and the old export untouched"; exit 1; }
 pass "--logout-after reports a sign-out that did not happen"
@@ -678,7 +851,7 @@ expect "$WORK/mu9b.log" "To import kelly's old passwords, put their export in th
 expect "$WORK/mu9b.log" "not kelly's" "the prompt warns that this Mac's Passwords app is not that person's"
 pass "dedupe and exports follow the profile"
 
-# No --user: the shared sign-in, folders, report name and silent export pick-up, exactly as before profiles.
+# No --user: the shared sign-in and folders, and the silent export pick-up, as before profiles.
 MOM_BEFORE="$(snapshot "$MOM")"; DAD_BEFORE="$(snapshot "$DAD")"
 cp "$FX/chrome.csv" "$MU_DL/Google Passwords.csv"
 CALLS="$(wc -l <"$MU_BWLOG")"
@@ -688,8 +861,10 @@ expect "$WORK/mu10.log" '^==> Sign in to Bitwarden. Type your email, then your m
 expect "$WORK/mu10.log" "Moved Google Passwords.csv to Bitwarden Import/chrome-passwords-$TODAY.csv" "without --user a fresh export is still picked up without asking"
 ! bw_calls_since "$CALLS" | grep -qv '^data ' || { bw_calls_since "$CALLS"; echo "FAIL a run without --user must use the shared data folder only"; exit 1; }
 [ -f "$MU_APP/data/account" ] && [ -f "$MU_APP/Bitwarden Import/new-for-bitwarden.csv" ] || { echo "FAIL a run without --user must use the shared sign-in and import folder"; exit 1; }
-expect "$MU_HOME/Desktop/Bitwarden Report.html" '<td>Logins with a password</td><td>5</td>' "without --user the report keeps its name"
-[ "$(tail -1 "$WORK/mu10.log")" = "==> Done. The report is on your Desktop as 'Bitwarden Report.html'. Your vault is locked again." ] || { tail -2 "$WORK/mu10.log"; echo "FAIL without --user the closing line must be unchanged"; exit 1; }
+expect "$(newest_report "$MU_APP")" '<td>Logins with a password</td><td>5</td>' "without --user the report goes to the shared Reports folder"
+[ "$(ls "$MU_APP/Reports" | tr '\n' '|' | sed -E 's/[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{6}/STAMP/')" = "Bitwarden Report STAMP.html|progress.json|" ] || { ls "$MU_APP/Reports"; echo "FAIL the shared Reports folder must hold one dated report and the progress file"; exit 1; }
+[ "$(tail -1 "$WORK/mu10.log")" = "==> Done. The report is open in your browser. It is kept in $MU_APP/Reports, not on the Desktop. Your vault is locked again." ] || { tail -2 "$WORK/mu10.log"; echo "FAIL without --user the closing line must name the shared Reports folder"; exit 1; }
+[ "$(ls -A "$MU_HOME/Desktop")" = "Bitwarden Report - mom.html" ] && ! grep -q 'older report' "$WORK/mu10.log" || { echo "FAIL a run without --user wrote to the Desktop, or pointed at another person's old report"; exit 1; }
 [ "$(bw_calls_since "$CALLS" | tail -1)" = "data lock" ] || { echo "FAIL without --logout-after the run must end by locking, not signing out"; exit 1; }
 [ "$(snapshot "$MOM")" = "$MOM_BEFORE" ] && [ "$(snapshot "$DAD")" = "$DAD_BEFORE" ] || { echo "FAIL a run without --user changed a profile's folder"; exit 1; }
 mu owner@example.com /dev/null logout >"$WORK/mu11.log" 2>&1 || { cat "$WORK/mu11.log"; echo "FAIL logout without --user"; exit 1; }
@@ -704,13 +879,14 @@ expect bw-health.sh 'Send a screenshot of this window to the person who sent you
 expect bw_dedupe.py 'tell the person who sent you this line what this window printed' "the read-back stop message names no one"
 pass "no personal name is hard-coded; messages say 'the person who sent you this line'"
 
-# The README names every script and test file, and its paste line uses the script's own base URL.
+# The README names every fetched file and test file, and its paste lines use the tag of the script's version.
 # Cannot catch a wrong description, only a missing or renamed file.
-for f in bw-health.sh bw_*.py tests/run.sh; do
+for f in bw-health.sh $FILES tests/run.sh; do
   grep -qF "\`$f\`" README.md || { echo "FAIL README does not mention $f"; exit 1; }
 done
-BASE="$(sed -n 's/^BASE_URL=.*:-\(.*\)}"$/\1/p' bw-health.sh)"
-[ -n "$BASE" ] && [ "$(grep -c 'curl -fsSL' README.md)" = "$(grep -cF "curl -fsSL $BASE/bw-health.sh" README.md)" ] || { echo "FAIL every README paste line must use the script's BASE_URL ($BASE)"; exit 1; }
-pass "the README names every script and uses the script's own URL"
+BASE="https://raw.githubusercontent.com/nellirob92/bw-health/v$VERSION"
+grep -qxF 'RELEASE_URL="https://raw.githubusercontent.com/nellirob92/bw-health/v$VERSION"' bw-health.sh || { echo "FAIL bw-health.sh must fetch from the tag of its own VERSION"; exit 1; }
+[ "$(grep -c 'curl -fsSL' README.md)" -gt 0 ] && [ "$(grep -c 'curl -fsSL' README.md)" = "$(grep -cF "curl -fsSL $BASE/bw-health.sh" README.md)" ] || { echo "FAIL every README paste line must use the tag of the script's VERSION ($BASE)"; exit 1; }
+pass "the README names every fetched file and its paste lines are pinned to the script's version tag"
 
 echo; echo "ALL TESTS PASSED"

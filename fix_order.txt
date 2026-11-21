@@ -1,0 +1,220 @@
+# Fix order for the report: which logins to fix first.
+#
+# One entry per line. A line that starts with # is a note.
+#
+#   <tier> <domain>          a site, and every address under it: "1 google.com" also covers
+#                            accounts.google.com, but not google.example.com
+#   <tier> folder: <name>    every login kept in a Bitwarden folder with exactly this name
+#                            (capitals do not matter). A folder line wins over a domain line.
+#
+# Tiers:
+#   1  email, and Apple, Google and Microsoft accounts (they reset every other password)
+#   2  money: banks, cards, brokerages, payment apps, Amazon, PayPal, tax, government benefits
+#   3  phone carrier, utilities, insurance, health portals
+#   4  gaming and social
+#   5  everything else (any site not listed here)
+
+# --- folders ---------------------------------------------------------------------------------
+1 folder: Email
+2 folder: Money
+2 folder: Banking
+2 folder: Finance
+3 folder: Bills
+3 folder: Utilities
+3 folder: Insurance
+3 folder: Health
+4 folder: Games
+4 folder: Social
+
+# --- 1: email, Apple, Google, Microsoft ------------------------------------------------------
+1 google.com
+1 gmail.com
+1 googlemail.com
+1 youtube.com
+1 apple.com
+1 icloud.com
+1 me.com
+1 microsoft.com
+1 microsoftonline.com
+1 live.com
+1 outlook.com
+1 hotmail.com
+1 msn.com
+1 office.com
+1 yahoo.com
+1 aol.com
+1 proton.me
+1 protonmail.com
+1 fastmail.com
+1 zoho.com
+1 gmx.com
+1 mail.com
+1 att.net
+1 comcast.net
+1 verizon.net
+1 bitwarden.com
+1 bitwarden.eu
+
+# --- 2: money --------------------------------------------------------------------------------
+2 chase.com
+2 bankofamerica.com
+2 wellsfargo.com
+2 citi.com
+2 citibank.com
+2 capitalone.com
+2 usbank.com
+2 pnc.com
+2 truist.com
+2 tdbank.com
+2 td.com
+2 ally.com
+2 discover.com
+2 americanexpress.com
+2 synchrony.com
+2 synchronybank.com
+2 barclaysus.com
+2 navyfederal.org
+2 usaa.com
+2 citizensbank.com
+2 regions.com
+2 huntington.com
+2 53.com
+2 key.com
+2 bmo.com
+2 santanderbank.com
+2 hsbc.com
+2 sofi.com
+2 chime.com
+2 marcus.com
+2 schwab.com
+2 fidelity.com
+2 vanguard.com
+2 etrade.com
+2 robinhood.com
+2 merrilledge.com
+2 ml.com
+2 morganstanley.com
+2 wealthfront.com
+2 betterment.com
+2 coinbase.com
+2 kraken.com
+2 paypal.com
+2 venmo.com
+2 cash.app
+2 zellepay.com
+2 wise.com
+2 amazon.com
+2 irs.gov
+2 id.me
+2 login.gov
+2 ssa.gov
+2 medicare.gov
+2 treasurydirect.gov
+2 studentaid.gov
+2 intuit.com
+2 turbotax.com
+2 hrblock.com
+2 freetaxusa.com
+2 experian.com
+2 equifax.com
+2 transunion.com
+2 creditkarma.com
+2 annualcreditreport.com
+
+# --- 3: phone carrier, utilities, insurance, health ------------------------------------------
+3 verizon.com
+3 att.com
+3 t-mobile.com
+3 xfinity.com
+3 comcast.com
+3 spectrum.net
+3 spectrum.com
+3 cox.com
+3 optimum.net
+3 frontier.com
+3 centurylink.com
+3 mintmobile.com
+3 visible.com
+3 uscellular.com
+3 cricketwireless.com
+3 boostmobile.com
+3 coned.com
+3 pge.com
+3 sce.com
+3 duke-energy.com
+3 nationalgridus.com
+3 dominionenergy.com
+3 fpl.com
+3 xcelenergy.com
+3 pseg.com
+3 eversource.com
+3 geico.com
+3 progressive.com
+3 statefarm.com
+3 allstate.com
+3 libertymutual.com
+3 nationwide.com
+3 farmers.com
+3 travelers.com
+3 metlife.com
+3 prudential.com
+3 aetna.com
+3 cigna.com
+3 uhc.com
+3 myuhc.com
+3 anthem.com
+3 bcbs.com
+3 humana.com
+3 kaiserpermanente.org
+3 kp.org
+3 deltadental.com
+3 vsp.com
+3 healthcare.gov
+3 mychart.org
+3 mychart.com
+3 followmyhealth.com
+3 athenahealth.com
+3 cvs.com
+3 caremark.com
+3 walgreens.com
+3 express-scripts.com
+3 optum.com
+3 optumrx.com
+3 labcorp.com
+3 questdiagnostics.com
+3 zocdoc.com
+3 teladoc.com
+3 goodrx.com
+
+# --- 4: gaming and social --------------------------------------------------------------------
+4 roblox.com
+4 steampowered.com
+4 steamcommunity.com
+4 epicgames.com
+4 xbox.com
+4 minecraft.net
+4 playstation.com
+4 sonyentertainmentnetwork.com
+4 nintendo.com
+4 ea.com
+4 blizzard.com
+4 battle.net
+4 riotgames.com
+4 twitch.tv
+4 discord.com
+4 facebook.com
+4 messenger.com
+4 instagram.com
+4 threads.net
+4 whatsapp.com
+4 tiktok.com
+4 snapchat.com
+4 x.com
+4 twitter.com
+4 reddit.com
+4 linkedin.com
+4 pinterest.com
+4 tumblr.com
+4 bsky.app
+4 nextdoor.com
+4 telegram.org

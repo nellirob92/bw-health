@@ -6,8 +6,9 @@
 #   curl -fsSL <BASE_URL>/bw-health.sh | bash -s -- dedupe merge apply [N]   # act on it, after a typed confirmation
 #   curl -fsSL <BASE_URL>/bw-health.sh | bash -s -- logout             # sign out of Bitwarden on this Mac
 #   bash bw-health.sh exports                                          # stage Downloads exports only
-# Several people on one Mac account: add --user NAME to any line (own sign-in, folders and report),
+# Several people on one Mac account: add --user NAME to any line (own sign-in, folders and reports),
 # and --logout-after to sign that person out when the run ends.
+# <BASE_URL> is a release tag (see VERSION below), never main.
 # Only the dedupe step ever changes the vault; see README.md.
 
 set -euo pipefail
@@ -46,20 +47,37 @@ case "${1:-}" in
   *) fail "unknown step: $1. Leave it out for the check-up, or use check, exports, dedupe or logout." ;;
 esac
 
-BASE_URL="${BW_HEALTH_BASE_URL:-https://raw.githubusercontent.com/nellirob92/bw-health/main}"
+# A release is a tag. This script fetches its files from the tag of its own version and uses each
+# one only if it matches the checksum below, so no run depends on whatever is on main.
+VERSION="1.0.0"
+RELEASE_URL="https://raw.githubusercontent.com/nellirob92/bw-health/v$VERSION"
+BASE_URL="${BW_HEALTH_BASE_URL:-$RELEASE_URL}"
+FILES="bw_report.py bw_import_diff.py bw_dedupe.py fix_order.txt"
+# SHA-256 of each fetched file. `bash tests/run.sh` fails, and prints the right value, when one is stale.
+pinned_sha256() { # <file name>
+  case "$1" in
+    bw_report.py)      echo "74af9baa0135510e9f7fe5f052349d0e6010eed7d6bb493f9589838d7c401b18" ;;
+    bw_import_diff.py) echo "5c01fa14640d0de6e844cde52944cbef8d116ed91fb2ce3f064430ff17bdf37c" ;;
+    bw_dedupe.py)      echo "8d55188435ddfd668a63059c365b33a8bca5842343c886713c6f88cc09623eea" ;;
+    fix_order.txt)     echo "134c01685284c4884afffeb5c36c7ee0c92872de4775ee0c593b8f45f76bcda0" ;;
+    *) fail "no checksum is written in bw-health.sh for $1" ;;
+  esac
+}
 APP_DIR="$HOME/Library/Application Support/bw-health"
 BIN_DIR="$APP_DIR/bin"
-REPORT_DIR="$HOME/Desktop"
-# A profile (--user NAME) has its own sign-in, import folder, dedupe plan and report, so several
-# people can take turns on one Mac account. Without one, everything is where it has always been.
+# A profile (--user NAME) has its own sign-in, import folder, dedupe plan and reports, so several
+# people can take turns on one Mac account. Without one, the shared folder is used.
 if [ -n "$PROFILE" ]; then
-  PROFILE_DIR="$APP_DIR/profiles/$PROFILE"; REPORT_NAME="Bitwarden Report - $PROFILE.html"; TAG="Profile $PROFILE: "
+  PROFILE_DIR="$APP_DIR/profiles/$PROFILE"; REPORT_NAME="Bitwarden Report - $PROFILE"; TAG="Profile $PROFILE: "
 else
-  PROFILE_DIR="$APP_DIR"; REPORT_NAME="Bitwarden Report.html"; TAG=""
+  PROFILE_DIR="$APP_DIR"; REPORT_NAME="Bitwarden Report"; TAG=""
 fi
-# Under Library, never Desktop: iCloud's Desktop sync would upload the plain-text exports.
+# Under Library, never Desktop or Documents: iCloud would upload the plain-text exports, and the
+# reports list every site and username.
 IMPORT_DIR="$PROFILE_DIR/Bitwarden Import"
 DEDUPE_DIR="$PROFILE_DIR/Dedupe Plan"
+REPORTS_DIR="$PROFILE_DIR/Reports"
+KEEP_REPORTS=10
 UV="$HOME/.local/bin/uv"
 BW="$BIN_DIR/bw"
 # Pinned: the download is a release file, not a GitHub API lookup (the API rate-limits shared IPs).
@@ -67,21 +85,50 @@ BW="$BIN_DIR/bw"
 BW_CLI_VERSION="2026.10.0"
 BW_CLI_SHA256_ARM64="062c880508678b8d936ab2522a3a1e92d60f52b5c534e71406e9b47329e95207"
 BW_CLI_SHA256_X64="39602a597ca63127c22ee3844546f3fe06079e4f67be7b9a7ea4e30ede8721d0"
-SCRIPTS="bw_report.py bw_import_diff.py bw_dedupe.py"
 
-# Run as a file with the report scripts beside it (a clone), this uses those, so a branch can be
-# tried before it is released. Piped from curl there is no file, and BW_HEALTH_BASE_URL still wins.
+# Run as a file with its files beside it (a clone), this uses those, so a branch can be tried
+# before it is released. Piped from curl there is no file, and BW_HEALTH_BASE_URL still wins.
+# Wherever a file comes from, it is used only if it matches its checksum above.
 LOCAL_SRC=""
 if [ -z "${BW_HEALTH_BASE_URL:-}" ] && [ -n "${BASH_SOURCE[0]:-}" ]; then
   self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   beside=0
-  for f in $SCRIPTS; do [ ! -f "$self_dir/$f" ] || beside=$((beside + 1)); done
+  for f in $FILES; do [ ! -f "$self_dir/$f" ] || beside=$((beside + 1)); done
   case "$beside" in
     0) ;;
-    3) LOCAL_SRC="$self_dir" ;;
-    *) fail "only some of the report scripts are beside bw-health.sh in $self_dir. Expected all three, or none." ;;
+    4) LOCAL_SRC="$self_dir" ;;
+    *) fail "only some of this tool's files are beside bw-health.sh in $self_dir. Expected all four ($FILES), or none." ;;
   esac
 fi
+fetch_file() { # <file name>: into APP_DIR, and only if it matches its pinned checksum
+  local f="$1" new="$APP_DIR/$1.new" want got
+  want="$(pinned_sha256 "$f")" || exit 1
+  if [ -n "$LOCAL_SRC" ]; then
+    cp "$LOCAL_SRC/$f" "$new" || fail "could not copy $f"
+  else
+    curl -fsSL "$BASE_URL/$f" -o "$new" || fail "could not download $f"
+  fi
+  got="$(shasum -a 256 "$new" | cut -d' ' -f1)"
+  if [ "$got" != "$want" ]; then
+    rm -f "$new"
+    fail "$f did not match the checksum written in bw-health.sh, so it was not used${LOCAL_SRC:+. If you changed it, update its checksum (see README, For maintainers)}"
+  fi
+  mv "$new" "$APP_DIR/$f"
+}
+# Only the newest KEEP_REPORTS reports are kept, and only this person's Reports folder is touched.
+# The names carry the time, so the sorted list is oldest first.
+prune_reports() {
+  local all=() extra i
+  shopt -s nullglob
+  all=("$REPORTS_DIR/$REPORT_NAME "*.html)
+  shopt -u nullglob
+  extra=$(( ${#all[@]} - KEEP_REPORTS ))
+  [ "$extra" -gt 0 ] || return 0
+  for ((i = 0; i < extra; i++)); do
+    rm "${all[$i]}" || fail "could not remove an old report: ${all[$i]}"
+  done
+  say "Removed $extra older report(s) from $REPORTS_DIR. The newest $KEEP_REPORTS are kept."
+}
 
 # A failed unlock is almost always a mistyped master password; say so in plain words (bw's own lines stay above it).
 fail_unlock() {
@@ -286,6 +333,14 @@ if [ "${1:-}" = "logout" ] && [ -n "$PROFILE" ] && [ ! -d "$PROFILE_DIR" ]; then
   # A mistyped name must not report "nothing to sign out" while the real profile stays signed in.
   fail "no profile named $PROFILE has been used on this Mac. Profiles here: $(ls "$APP_DIR/profiles" 2>/dev/null | tr '\n' ' ')"
 fi
+if [ -n "$LOCAL_SRC" ]; then
+  say "bw-health v$VERSION, using the report scripts beside this file ($LOCAL_SRC), not the published ones"
+else
+  # The script cannot tell which line fetched it (an old line still points at main), so every
+  # fetched run opens with the line that pins this version.
+  say "bw-health v$VERSION. The line that always runs exactly this version:
+    curl -fsSL $RELEASE_URL/bw-health.sh | bash"
+fi
 export BITWARDENCLI_APPDATA_DIR="$PROFILE_DIR/data"
 mkdir -p "$BIN_DIR" "$BITWARDENCLI_APPDATA_DIR"
 
@@ -311,17 +366,8 @@ if [ ! -x "$BW" ]; then
   chmod +x "$BW"
 fi
 
-if [ -n "$LOCAL_SRC" ]; then
-  say "Using the report scripts beside this file ($LOCAL_SRC), not the published ones"
-  for f in $SCRIPTS; do
-    cp "$LOCAL_SRC/$f" "$APP_DIR/$f" || fail "could not copy $f"
-  done
-else
-  say "Fetching the report scripts"
-  for f in $SCRIPTS; do
-    curl -fsSL "$BASE_URL/$f" -o "$APP_DIR/$f" || fail "could not download $f"
-  done
-fi
+[ -n "$LOCAL_SRC" ] || say "Fetching the report scripts"
+for f in $FILES; do fetch_file "$f"; done
 
 case "${1:-}" in
   check)
@@ -391,9 +437,16 @@ if [ "${1:-}" = "dedupe" ]; then
   exit 0
 fi
 
-report="$REPORT_DIR/$REPORT_NAME"
-"$UV" run --quiet "$APP_DIR/bw_report.py" --html --out "$report" || fail "report failed"
+# A dated report per run, in this person's own folder. The progress file beside it holds item ids
+# and the reasons they were flagged, so the next run can say what was fixed.
+mkdir -p "$REPORTS_DIR"
+chmod 700 "$REPORTS_DIR"
+report="$REPORTS_DIR/$REPORT_NAME $(date '+%Y-%m-%d %H%M%S').html"
+"$UV" run --quiet "$APP_DIR/bw_report.py" --html --out "$report" --state "$REPORTS_DIR/progress.json" \
+  --twofa-cache "$APP_DIR/2fa-directory.json" || fail "report failed"
+chmod 600 "$report"
 open "$report"
+prune_reports
 say "This check only reads your vault. It never merges, deletes or changes anything. Cleaning up duplicates is a separate step you start yourself, and it shows you everything first."
 
 # --- 4. optional import diff --------------------------------------------------------------
@@ -424,4 +477,5 @@ elif [ "$MOVED" -gt 0 ]; then
   say "$MOVED old export file(s) were moved into the Bitwarden Import folder that just opened. Drag it to the Trash and empty it: they contain your passwords in plain text."
 fi
 
-say "Done. The report is on your Desktop as '$REPORT_NAME'. Your vault is locked again."
+[ ! -e "$HOME/Desktop/$REPORT_NAME.html" ] || say "An older report, '$REPORT_NAME.html', is still on your Desktop. Reports are no longer saved there: drag it to the Trash."
+say "Done. The report is open in your browser. It is kept in $REPORTS_DIR, not on the Desktop. Your vault is locked again."
