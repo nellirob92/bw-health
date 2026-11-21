@@ -262,6 +262,7 @@ expect "$DT" '^\| fieldclash.test \| fc \| 2 \| No: a custom field with differen
 expect "$DT" '^\| passkeyshop.test \| pk \| 2 \| Yes \|$' "a pair where one copy holds a passkey is safe to merge"
 ! sed -n '/^## Duplicate entries/,/^## /p' "$DT" | grep -q '^| [a-z]*\.github\.io ' || { echo "FAIL two sites on github.io were listed as duplicates"; exit 1; }
 expect "$DT" '^Tidy 4 Duplicates 3 groups safe to merge$' "the duplicates card says how many groups are safe to merge"
+[ "$(sed -n '/^### Sites per problem/,/^### /p' "$DT" | grep -E '^(Exposed|Two-step) ' | tr '\n' '|')" = "Exposed not checked|Two-step not checked|" ] || { echo "FAIL a check that did not run was drawn as a bar of 0"; exit 1; }
 expect "$DT" "^3 groups are safe to merge: .*$(printf '%s' "$PASTE" | sed 's/[|.]/\\&/g') --user mom dedupe merge\. Then act on one group first: .* --user mom dedupe merge apply 1, and type DEDUPE" "the report gives the exact commands, with the person's name"
 [ "$(grep -o 'itemId=d7[ab]" title="Open in Bitwarden" target="_blank" rel="noopener noreferrer">pk<' "$DH" | sort -u)" = 'itemId=d7a" title="Open in Bitwarden" target="_blank" rel="noopener noreferrer">pk<' ] || { echo "FAIL the account must open the copy that holds the passkey, the one a merge keeps"; exit 1; }
 expect "$DT" '^1 login saved with only an http:// address can get the https:// address added for you' "the report says how many logins the AutoFill fix can do"
@@ -1043,8 +1044,9 @@ expect "$WORK/mu11.log" '^==> Bitwarden is signed out on this Mac\.$' "logout wi
 pass "without --user everything is where it was; logout works there too"
 
 # No person is named in the tool, its messages, its tests or its docs: whoever shares the paste line is
-# "the person who sent you this line". Cannot catch a name other than the one it looks for.
-! git grep -nw -e 'R[o]b' -- . ':!tests/fixture' || { echo "FAIL a personal name is hard-coded in the tool, its tests or its docs"; exit 1; }
+# "the person who sent you this line". Cannot catch a name other than the one it looks for. The public suffix
+# list is a third-party copy whose contributor credits are kept as published.
+! git grep -nw -e 'R[o]b' -- . ':!tests/fixture' ':!public_suffix_list.dat' || { echo "FAIL a personal name is hard-coded in the tool, its tests or its docs"; exit 1; }
 expect bw-health.sh 'Send a screenshot of this window to the person who sent you this line' "the generic failure message names no one"
 expect bw_dedupe.py 'tell the person who sent you this line what this window printed' "the read-back stop message names no one"
 pass "no personal name is hard-coded; messages say 'the person who sent you this line'"

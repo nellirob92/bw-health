@@ -730,13 +730,13 @@ def ring(work: int, total: int) -> str:
             f'<span class="key-fine">{svg("ok")} thin: {total - work} with nothing to do</span></figcaption></figure>')
 
 
-def bars(title: str, rows: list[tuple[str, str, int]]) -> str:
+def bars(title: str, rows: list[tuple[str, str, int | None]]) -> str:
     """Horizontal bars, each with its word and its number: the color only repeats what the word says.
-    rows: (word, kind, count), the kind naming the color and, for a problem, its shape."""
-    top = max((n for _, _, n in rows), default=0) or 1
+    rows: (word, kind, count), the kind naming the color and, for a problem, its shape; None: not checked this run."""
+    top = max((n for _, _, n in rows if n is not None), default=0) or 1
     out = "".join(f'<div class="bar"><span class="bl">{svg(kind) if kind in SHAPES else ""}{esc(word)}</span>'
-                  f'<span class="track"><span class="fill f-{kind}" style="width:{100 * n / top:.1f}%"></span></span>'
-                  f'<span class="bn">{n}</span></div>' for word, kind, n in rows)
+                  f'<span class="track"><span class="fill f-{kind}" style="width:{100 * (n or 0) / top:.1f}%"></span></span>'
+                  f'<span class="bn">{"not checked" if n is None else n}</span></div>' for word, kind, n in rows)
     return f'<div class="bars"><h3>{title}</h3>{out}</div>'
 
 
@@ -762,7 +762,9 @@ def dashboard(m: Model, for_summary: bool) -> str:
                 f'{"has" if fine == 1 else "have"} nothing to do. A site is one website and one username: copies of the same login, '
                 f'and its other addresses, count once.</p>')
     notes = f'<p class="muted">Separately, {plural(len(rep.notes), "note", "notes")} may hold a password.</p>' if rep.notes else ""
-    problem_rows = [(CHIP_WORDS[p], p, len(m.with_problem(p))) for p in SEVERITY]
+    not_run = {EXPOSED} if not rep.hibp_checked else set()
+    not_run |= {TWOFA} if rep.twofa_skipped else set()
+    problem_rows = [(CHIP_WORDS[p], p, None if p in not_run else len(m.with_problem(p))) for p in SEVERITY]
     tier_rows = [(f"{t} · {name}", "tier", sum(1 for s in m.to_fix if s.tier == t)) for t, name in TIER_NAMES.items()]
     return (f'<section class="dash">{ring(work, total)}<div class="lead">{headline}{notes}</div></section>'
             f'<div class="scores">{cards}</div><div class="charts">{bars("Sites per problem", problem_rows)}'
