@@ -120,6 +120,14 @@ expect "$WORK/bad-order.html.log" "bad-order.txt line 2: 'not a domain' is not a
 printf '1 example.com\n2 example.com\n' >"$WORK/bad-order.txt"
 if health "$H" "$WORK/bad-order.html" --no-twofa --fix-order "$WORK/bad-order.txt"; then echo "FAIL a domain listed in two tiers was accepted"; exit 1; fi
 expect "$WORK/bad-order.html.log" "line 2: 'example.com' is listed twice with different tiers" "a domain listed in two tiers is refused"
+printf '1 .gov\n2 .g0v\n' >"$WORK/bad-order.txt"
+if health "$H" "$WORK/bad-order.html" --no-twofa --fix-order "$WORK/bad-order.txt"; then echo "FAIL a malformed ending line was accepted"; exit 1; fi
+expect "$WORK/bad-order.html.log" "bad-order.txt line 2: '.g0v' is not a top-level ending like .gov" "a malformed ending line is named with its line number"
+echo '[{"id":"g1","type":1,"name":"Medicare","deletedDate":null,"login":{"username":"a","password":"letmein","uris":[{"uri":"https://www.medicare.gov"}]}},{"id":"g2","type":1,"name":"IRS","deletedDate":null,"login":{"username":"b","password":"letmein1","uris":[{"uri":"https://sa.www4.irs.gov"}]}}]' >"$WORK/gov.json"
+printf '1 .gov\n3 medicare.gov\n' >"$WORK/gov-order.txt"
+health "$WORK/gov.json" "$WORK/gov.html" --no-twofa --fix-order "$WORK/gov-order.txt"
+expect "$WORK/gov.txt" '^\| 1 · Email & main accounts \| irs.gov \| b \|' "an ending line sets the tier of every address ending in it"
+expect "$WORK/gov.txt" '^\| 3 · Phone, utilities, insurance & health \| medicare.gov \| a \|' "a domain line wins over an ending line"
 pass "the fix order matches listed domains and folders only"
 
 # Two-step login: matched here against a saved copy of the list. A site counts when the list has it, an
@@ -202,20 +210,22 @@ expect "$WORK/h-oddvault.txt" 'In the Bitwarden web vault, open Settings, then S
 pass "links come from the saved address, the item id and the server only"
 
 # Progress: the file holds item ids and reason names, nothing else, and the next run compares against it.
-expect "$T" '^First check-up of this vault on this Mac: 14 entries flagged\.' "a first run says so and counts what is flagged"
+expect "$T" '^First check-up of this vault on this Mac: 12 sites need work\.' "a first run says so and counts sites, not entries"
+expect "$T" ' · In Bitwarden entries: 14 flagged\.$' "the entry count is only in the small totals line"
 P="$WORK/progress.json"
 [ "$(stat -f %Lp "$P")" = "600" ] || { echo "FAIL the progress file is not owner-only"; exit 1; }
-[ "$(/usr/bin/jq -c --slurpfile vault "$H" '[(keys == ["checks","date","flagged","version"]), ((.flagged | keys) - ($vault[0] | map(.id)) == []), ([.flagged[][], .checks[]] | all(IN("exposed","reused","weak","duplicate","two-step","autofill","old","notes"))), (.flagged | length == 14), (.flagged.h5 == ["weak"]), (.checks | index("exposed") == null)]' "$P")" = "[true,true,true,true,true,true]" ] || { cat "$P"; echo "FAIL the progress file must hold item ids and reason names only, and only the checks that ran"; exit 1; }
+[ "$(/usr/bin/jq -c --slurpfile vault "$H" '[(keys == ["checks","date","flagged","version"]), ((.flagged | keys) - ($vault[0] | map(.id)) == []), ([.flagged[][], .checks[]] | all(IN("exposed","reused","weak","duplicate","masked","two-step","autofill","old","notes"))), (.flagged | length == 14), (.flagged.h5 == ["weak"]), (.checks | index("exposed") == null)]' "$P")" = "[true,true,true,true,true,true]" ] || { cat "$P"; echo "FAIL the progress file must hold item ids and reason names only, and only the checks that ran"; exit 1; }
 ! grep -qi 'forum\|example\|chase\|password1\|Hunter2\|jsmith\|Zr8' "$P" || { echo "FAIL a name, site, username or password reached the progress file"; exit 1; }
 # Second run: Forum's password and the Wifi note are fixed; Bank app loses its https:// address.
 /usr/bin/jq 'map(if .id == "h5" then .login.password = "Zr8#kLm2$Qv9xT4w-05" elif .id == "h9" then .notes = "nothing here" elif .id == "h8" then .login.uris = [{"uri":"http://bank.example.com"}] else . end)' "$H" >"$WORK/health2.json"
 health "$WORK/health2.json" "$WORK/h2.html" --twofa-file "$FX/twofa.json" --state "$P"
-expect "$WORK/h2.txt" '^2 fixed since [0-9]{4}-[0-9]{2}-[0-9]{2}, 13 left\. 1 new since then, marked NEW\. Counted in Bitwarden entries' "the next run counts what was fixed, what is left and what is new"
+expect "$WORK/h2.txt" '^1 fixed since [0-9]{4}-[0-9]{2}-[0-9]{2}, 12 sites left, 1 new\. New ones are marked NEW\.$' "the next run counts sites fixed, left and new (a fixed note is not a site)"
+expect "$WORK/h2.txt" ' · In Bitwarden entries: 13 flagged, 2 fixed and 1 new since [0-9]{4}-[0-9]{2}-[0-9]{2}\.$' "entries are counted only in the small totals line"
 expect "$WORK/h2.txt" '^\| 5 · Everything else \| example.com \| bank \| AutoFill NEW \| 1 \|$' "a newly flagged site is marked NEW"
 [ "$(grep -c '^|.* NEW |' "$WORK/h2.txt")" = "1" ] || { grep 'NEW' "$WORK/h2.txt"; echo "FAIL a site flagged before was marked NEW"; exit 1; }
 # Third run without the two-step check: the four logins only it flags are neither fixed nor new.
 health "$WORK/health2.json" "$WORK/h3.html" --no-twofa --state "$P"
-expect "$WORK/h3.txt" '^0 fixed since [0-9]{4}-[0-9]{2}-[0-9]{2}, 9 left\. Counted' "a check that did not run is not counted as fixed"
+expect "$WORK/h3.txt" '^0 fixed since [0-9]{4}-[0-9]{2}-[0-9]{2}, 8 sites left, 0 new\.$' "a check that did not run is not counted as fixed"
 echo '{"flagged": []}' >"$WORK/bad-progress.json"
 if health "$H" "$WORK/h-badstate.html" --no-twofa --state "$WORK/bad-progress.json"; then echo "FAIL a progress file of the wrong shape was accepted"; exit 1; fi
 expect "$WORK/h-badstate.html.log" 'is not a progress file this script wrote' "a progress file of the wrong shape is refused"
@@ -242,7 +252,18 @@ expect "$DT" '^\| 5 · Everything else \| androidapp://com.example.app \| app \|
 ! grep -q 'href="https://192\|href="https://localhost\|href="androidapp\|href="https://example.app\|href="https://oldsite' "$DH" || { echo "FAIL a device, an app or an http://-only site got a change-password link"; exit 1; }
 pass "sites are grouped by registrable domain from the public suffix list; devices and apps stand alone, unlinked"
 
-expect "$DT" '^\| 5 · Everything else \| masked.test \| jo\*\*n@ex\*\*\*le.com \| Weak \| 1 \|$' "a masked username shows as it was typed"
+expect "$DT" '^\| 5 · Everything else \| masked.test \| jo\*\*n@ex\*\*\*le.com \| Weak Masked \| 1 \|$' "a masked username that fits no plain one shows as typed, with a Masked chip"
+# masked.test also holds jolyn@example.com.au: its first letters fit, but a different length never fits.
+# A masked username that fits exactly one plain username on the site (same length, same letters where shown, any
+# capitals) is a copy of that account, sent to pick; fitting two plain usernames, it cannot be placed and stands alone.
+expect "$DT" '^\| 5 · Everything else \| pair.test \| jane@pair.test \| Duplicate \| 2 pair.test app.pair.test saved as J\*\*e@pair.test masked copy \|$' "a masked username fitting one plain username is listed as a masked copy on that row"
+! grep -q '^| [0-9] · [^|]* | [^|]* | J\*\*e@pair.test |' "$DT" || { echo "FAIL a masked copy that fits one account also got a row of its own"; exit 1; }
+expect "$DT" '^\| pair.test \| jane@pair.test \| 2 \| Needs pick \|$' "a masked copy is never safe to merge on its own: it needs a pick"
+expect "$DT" '^\| 5 · Everything else \| two.test \| ann\*@two.test \| Masked \| 1 \|$' "a masked username fitting two plain usernames stays its own row, with a Masked chip"
+! sed -n '/^## Duplicate entries/,/^## /p' "$DT" | grep -q '^| two.test ' || { echo "FAIL a masked username fitting two accounts was grouped with one of them"; exit 1; }
+[ "$(grep -o 'saved as [^ |]*' "$DT" | sort -u | tr '\n' '|')" = "saved as J**e@pair.test|saved as Member|" ] || { grep -o 'saved as [^|]*' "$DT"; echo "FAIL the copies list names the username as saved only where it differs from the row's"; exit 1; }
+expect "$DT" '^\| 5 · Everything else \| bigbank.test \| member \| Duplicate \| 6 secure06.bigbank.test secure01.bigbank.test, bigbank.test secure02.bigbank.test secure03.bigbank.test secure04.bigbank.test secure05b.bigbank.test saved as Member \|$' "the copies list is one line per copy, the row's own copy first"
+pass "masked usernames: 0 matches stand alone, 1 match joins that account as a masked copy, 2 matches stand alone"
 ! grep -q '<strong>n@ex\|<em>' "$DH" || { echo "FAIL a masked username turned into bold or italics"; exit 1; }
 expect "$DH" '>&lt;script&gt;alert\(&quot;x&quot;\)&lt;/script&gt;<svg' "a username holding a script tag is escaped"
 [ "$(grep -o '<script' "$DH" | wc -l | tr -d ' ')" = "1" ] || { echo "FAIL the page has a script other than its own"; exit 1; }
@@ -261,25 +282,52 @@ expect "$DT" '^\| bigbank.test \| member \| 6 \| Yes \|$' "six copies with one p
 expect "$DT" '^\| fieldclash.test \| fc \| 2 \| No: a custom field with different values \|$' "a group with a field conflict is not safe, and says why"
 expect "$DT" '^\| passkeyshop.test \| pk \| 2 \| Yes \|$' "a pair where one copy holds a passkey is safe to merge"
 ! sed -n '/^## Duplicate entries/,/^## /p' "$DT" | grep -q '^| [a-z]*\.github\.io ' || { echo "FAIL two sites on github.io were listed as duplicates"; exit 1; }
-expect "$DT" '^Tidy 4 Duplicates 3 groups safe to merge$' "the duplicates card says how many groups are safe to merge"
+expect "$DT" '^Tidy 6 Duplicates 4 groups safe to merge$' "the duplicates card says how many groups are safe to merge"
 [ "$(sed -n '/^### Sites per problem/,/^### /p' "$DT" | grep -E '^(Exposed|Two-step) ' | tr '\n' '|')" = "Exposed not checked|Two-step not checked|" ] || { echo "FAIL a check that did not run was drawn as a bar of 0"; exit 1; }
-expect "$DT" "^3 groups are safe to merge: .*$(printf '%s' "$PASTE" | sed 's/[|.]/\\&/g') --user mom dedupe merge\. Then act on one group first: .* --user mom dedupe merge apply 1, and type DEDUPE" "the report gives the exact commands, with the person's name"
+expect "$DT" "^4 groups are safe to merge: .*$(printf '%s' "$PASTE" | sed 's/[|.]/\\&/g') --user mom dedupe merge\. Then act on one group first: .* --user mom dedupe merge apply 1, and type DEDUPE" "the report gives the exact commands, with the person's name"
 [ "$(grep -o 'itemId=d7[ab]" title="Open in Bitwarden" target="_blank" rel="noopener noreferrer">pk<' "$DH" | sort -u)" = 'itemId=d7a" title="Open in Bitwarden" target="_blank" rel="noopener noreferrer">pk<' ] || { echo "FAIL the account must open the copy that holds the passkey, the one a merge keeps"; exit 1; }
 expect "$DT" '^1 login saved with only an http:// address can get the https:// address added for you' "the report says how many logins the AutoFill fix can do"
 expect "$DT" ' --user mom fixurls apply 1, and type FIXURLS when asked' "and the command to run it"
 expect "$DT" '^Notes that may hold a password: Nothing found\.$' "an empty section is one line"
 ! grep -q '^## Notes that may hold\|^## Passwords unchanged' "$DT" || { echo "FAIL an empty section has a heading"; exit 1; }
 expect "$DH" '<div id="tools" class="tools" hidden>' "the filter and the done boxes are added by the page's script, so without it the page is plain tables"
+expect "$DH" '\[hidden\]\{display:none!important\}' "a box the script has not shown stays hidden, whatever display rule its class has"
 bad_ids="$(grep -o 'data-ids="[^"]*"' "$DH" | grep -vE '^data-ids="[A-Za-z0-9 -]+"$' || true)"
 [ -z "$bad_ids" ] && grep -q "localStorage.setItem(KEY, JSON.stringify(done))" "$DH" || { echo "FAIL a done tick must be kept under item ids only"; exit 1; }
 pass "duplicates, AutoFill commands, empty sections and the done boxes"
+
+# Fix order: an exposed password first, then a reused or weak one, then the smaller fixes; the kind of site
+# decides only within one of those. A first-tier duplicate (google.com) and a first-tier site whose only problem is
+# two-step login (gmail.com, from the saved list) must come after every weak or reused site.
+urgency_order() { # urgency_order <flat report>: the urgency of each row of "Fix these first" and the main table, in order
+  awk '/^## Fix these first/{s=1;next} /^Click a site/{s=0} /^\| Kind of site/{s=2;next} s==2&&!/^\| /{s=0}
+       s==1&&/ · /{print "first", (/ Exposed/?0:/ (Reused|Weak)/?1:2)} s==2{print "main", (/\| [^|]*Exposed/?0:/\| (Reused|Weak)/?1:2)}' "$1"
+}
+ranked() { # ranked <flat report>: every list goes from more urgent to less
+  urgency_order "$1" | awk '{if ($2 < last[$1]) bad=1; last[$1]=$2} END{exit bad}'
+}
+ranked "$DT" && expect "$DT" '^\| 1 · Email & main accounts \| google.com \| dup@gmail.test \| Duplicate \| 2 ' "a first-tier duplicate is in the table" || { urgency_order "$DT"; echo "FAIL a smaller fix ranked above a weak or reused password"; exit 1; }
+uv run --quiet bw_report.py --input "$D" --no-hibp --twofa-file "$FX/twofa.json" --out "$WORK/d2fa.html" >/dev/null
+flat "$WORK/d2fa.html"
+expect "$WORK/d2fa.txt" '^\| 1 · Email & main accounts \| gmail.com \| twostep@gmail.test \| Two-step \| 1 \|$' "a first-tier site whose only problem is two-step login"
+ranked "$WORK/d2fa.txt" || { urgency_order "$WORK/d2fa.txt"; echo "FAIL a two-step-only site ranked above a weak or reused password"; exit 1; }
+[ "$(sed -n '/^## Fix these first/,/^Click a site/p' "$WORK/d2fa.txt" | sed -n 3p)" = "id.me · gov Weak" ] || { sed -n '/^## Fix these first/,/^Click a site/p' "$WORK/d2fa.txt"; echo "FAIL Fix these first must open with a first-tier weak password"; exit 1; }
+pass "Fix these first and the main table rank by how serious first: two-step only never above exposed or weak"
+
+# Identity sites are first tier: every .gov address, by its ending, and id.me.
+for s in ssa.gov login.gov id.me; do expect "$DT" "^\| 1 · Email & main accounts \| $s \| gov \| Weak \| 1 \|$" "$s is an email and main account (identity)"; done
+# An address with no registrable domain is plain text, says why, and is never offered to the AutoFill fix.
+expect "$DT" "^\| http://\.something \| dot \| address isn't a web address \|$" "an address with no registrable domain says it isn't a web address"
+! grep -q 'href="https\?://[^"]*something' "$DH" || { echo "FAIL an address that isn't a web address was linked"; exit 1; }
+pass "identity sites rank first; an address that isn't a web address is named, never linked"
 
 DS="$WORK/d-summary.txt"
 expect "$DS" '^# Bitwarden summary for mom$' "the summary names the profile"
 expect "$DS" '^## How an attacker or AI tool would use this$' "the summary explains the risks in plain words"
 expect "$DS" '^Reused One leak from any site unlocks every other site' "one line per kind of risk"
 expect "$DS" '^Everything else: [0-9]+ sites need work \(' "risks are counted by kind of site"
-! grep -qiE 'bigbank|github|\.test|example|evil|member|admin|localhost|192\.168|jo\*\*n|script|@' "$DS" || { grep -iE 'bigbank|github|\.test|example|evil|member|admin|localhost|192\.168|jo\*\*n|script|@' "$DS"; echo "FAIL the summary holds a site, a username or a host"; exit 1; }
+SUMMARY_LEAK='bigbank|github|\.test|example|evil|member|admin|localhost|192\.168|jo\*\*n|script|@|ssa|id\.me|\.gov|google|gmail|something'
+! grep -qiE "$SUMMARY_LEAK" "$DS" || { grep -iE "$SUMMARY_LEAK" "$DS"; echo "FAIL the summary holds a site, a username or a host"; exit 1; }
 ! grep -q 'href=\|itemId\|data-ids\|<script' "$WORK/d-summary.html" || { echo "FAIL the summary holds a link, an item id or a script"; exit 1; }
 [ "$(stat -f %Lp "$WORK/d-summary.html")" = "600" ] || { echo "FAIL the summary is not owner-only"; exit 1; }
 pass "the summary holds counts only: no site, username, host, item id or link"
@@ -619,7 +667,9 @@ sv() { /usr/bin/jq -r --arg id "$1" ".[] | select(.id == \$id) | $2" "$WORK/stat
 cp "$FX/dashboard.json" "$WORK/state-site.json"; : >"$WORK/bw-site.log"
 site() { ( STATE="$WORK/state-site.json"; BWLOG="$WORK/bw-site.log"; dedupe "$@" ); }
 site "$WORK/tty-no" merge >"$WORK/dd-site1.log" 2>&1 || { cat "$WORK/dd-site1.log"; echo "FAIL merge dry run on the dashboard vault"; exit 1; }
-expect "$WORK/dd-site1.log" '^3 group\(s\) to change, 1 left alone, 0 for another stage' "merge finds the bank, the co.uk pair and the passkey pair, and leaves the field clash alone"
+expect "$WORK/dd-site1.log" '^4 group\(s\) to change, 2 left alone, 0 for another stage' "merge finds the bank, the co.uk, passkey and google.com pairs, and leaves the field clash and the masked copy alone"
+expect "$WORK/dd-site1.log" "^Left alone: 1 a custom field with different values, 1 a copy's username is masked with \\*\\.$" "merge leaves the masked copy to pick, with its reason"
+! sed -n '/^## Will change/,/^## Left alone/p' "$PLANS/plan-merge.md" | grep -q 'pair.test\|two.test' || { echo "FAIL a masked copy was planned for an automatic merge"; exit 1; }
 ! grep -q 'github' "$WORK/dd-site1.log" "$PLANS/plan-merge.md" || { echo "FAIL two sites on github.io were grouped as one account"; exit 1; }
 site "$WORK/tty-yes" merge --apply >"$WORK/dd-site2.log" 2>&1 || { cat "$WORK/dd-site2.log"; echo "FAIL merge apply on the dashboard vault"; exit 1; }
 [ "$(sv d1f .deletedDate)" = "null" ] && [ "$(/usr/bin/jq '[.[] | select(.id | test("^d1[a-e]$")) | select(.deletedDate == null)] | length' "$WORK/state-site.json")" = "0" ] || { echo "FAIL the newest bank copy must be kept and the five others trashed"; exit 1; }
@@ -627,14 +677,29 @@ site "$WORK/tty-yes" merge --apply >"$WORK/dd-site2.log" 2>&1 || { cat "$WORK/dd
 [ "$(sv d7a .deletedDate)" = "null" ] && [ "$(sv d7b .deletedDate)" != "null" ] && [ "$(sv d7a '.login.fido2Credentials | length')" = "1" ] || { echo "FAIL the older copy holding the passkey must be kept, with its passkey"; exit 1; }
 [ "$(sv d9b .deletedDate)" = "null" ] && [ "$(sv d9a .deletedDate)" != "null" ] || { echo "FAIL login.shop.co.uk and www.shop.co.uk must merge into the newest copy"; exit 1; }
 [ "$(/usr/bin/jq '[.[] | select(.id | test("^(d5|d6)")) | select(.deletedDate == null)] | length' "$WORK/state-site.json")" = "4" ] && ! grep -qE '^(edit|delete) item (d5|d6)' "$WORK/bw-site.log" || { echo "FAIL the github.io pair or the field-clash pair was touched"; exit 1; }
-pass "merge groups by registrable domain: one bank across subdomains, a co.uk pair, never two github.io sites"
+[ "$(/usr/bin/jq '[.[] | select(.id | test("^(d13|d14)")) | select(.deletedDate == null)] | length' "$WORK/state-site.json")" = "5" ] && ! grep -qE '^(edit|delete) item (d13|d14)' "$WORK/bw-site.log" || { echo "FAIL merge touched a masked username's group"; exit 1; }
+pass "merge groups by registrable domain: one bank across subdomains, a co.uk pair, never two github.io sites, never a masked copy"
+
+# The masked copy goes to pick, with both addresses shown and Enter keeping both.
+cp "$FX/dashboard.json" "$WORK/state-site.json"; : >"$WORK/bw-site.log"
+site "$WORK/tty-no" pick >"$WORK/dd-site3.log" 2>&1 || { cat "$WORK/dd-site3.log"; echo "FAIL pick dry run on the dashboard vault"; exit 1; }
+expect "$WORK/dd-site3.log" '^\[1/1\] pair.test \(jane@pair.test\), 2 copies, one with a masked username$' "pick takes the masked copy's group, and says why"
+expect "$WORK/dd-site3.log" '^  These may be separate accounts\. If they are, press Enter to keep both\.$' "a masked copy may be a separate account"
+expect "$WORK/dd-site3.log" '^ +[12] +"Pair \(Apple\)" +app\.pair\.test +folder: .*\(masked username\)$' "the masked copy shows its address and is marked"
+expect "$WORK/dd-site3.log" '^ +[12] +"Pair" +pair\.test +folder: .*\(kept entry\)$' "the plain copy shows its address and is the one kept"
+printf '\n' >"$WORK/tty-keep"
+site "$WORK/tty-keep" pick --apply >"$WORK/dd-site4.log" 2>&1 || { cat "$WORK/dd-site4.log"; echo "FAIL keeping both must end cleanly"; exit 1; }
+expect "$WORK/dd-site4.log" 'Kept both\. Nothing changes for this group\.' "Enter keeps both"
+cmp -s "$WORK/state-site.json" "$FX/dashboard.json" && ! grep -qE '^(edit|delete) ' "$WORK/bw-site.log" || { echo "FAIL keeping both changed the vault"; exit 1; }
+pass "a masked copy goes to pick with both addresses shown, and Enter keeps both"
 
 # The AutoFill fix adds an https:// twin of each http:// address, same match setting, and touches nothing else.
 fv() { /usr/bin/jq -c --arg id "$1" ".[] | select(.id == \$id) | $2" "$WORK/state-fix.json"; }
 cp "$FX/dashboard.json" "$WORK/state-fix.json"; cp "$WORK/state-fix.json" "$WORK/state-fix-before.json"; : >"$WORK/bw-fix.log"
 fixurls() { ( STATE="$WORK/state-fix.json"; BWLOG="$WORK/bw-fix.log"; dedupe "$1" fixurls "${@:2}" ); }
 fixurls "$WORK/tty-no" >"$WORK/fx1.log" 2>&1 || { cat "$WORK/fx1.log"; echo "FAIL AutoFill fix dry run"; exit 1; }
-expect "$WORK/fx1.log" '^1 login\(s\) to change, 1 left alone' "the AutoFill fix counts what it would change"
+expect "$WORK/fx1.log" '^1 login\(s\) to change, 2 left alone' "the AutoFill fix counts what it would change"
+expect "$WORK/fx1.log" "Left alone: .*1 an address that isn't a web address: correct it by hand in Bitwarden" "an address with no registrable domain is never offered to the AutoFill fix"
 expect "$WORK/fx1.log" 'Left alone: 1 holds a passkey: add its https:// address by hand in Bitwarden' "a login holding a passkey is left alone, with what to do instead"
 expect "$WORK/fx1.log" 'Nothing was changed' "an AutoFill dry run changes nothing"
 ! grep -q 'x=1' "$WORK/fx1.log" "$PLANS/plan-fixurls.md" || { echo "FAIL a query string reached the AutoFill preview or plan"; exit 1; }
@@ -659,7 +724,7 @@ pass "the AutoFill fix adds https:// twins only after FIXURLS, reads them back, 
 # is picked, so no edit. x1 (seeds), y1 (a field), y2 (history) and y3 (a match setting) also differ by
 # password and stay left alone, as does b4 (seeds only). Zoom (m2) is for the merge stage. Cannot catch the real
 # bw reporting passwordRevisionDate differently from this model.
-expect "$WORK/dd2.log" 'different passwords: dedupe pick' "exact and merge point to the pick stage for different-password groups"
+expect "$WORK/dd2.log" 'different passwords or a masked username: dedupe pick shows each copy.s addresses and dates and lets you choose the password to keep, or keep both' "exact and merge point to the pick stage for different-password groups"
 /usr/bin/jq '[.[] | select(.id | test("^(b1|b4|m2)"))] | map(if .id == "b1a" then .creationDate = "2025-12-01T00:00:00Z" elif .id == "b1b" then .creationDate = "2024-01-01T00:00:00Z" | .login.passwordRevisionDate = "2025-06-01T00:00:00Z" | .passwordHistory = [{"lastUsedDate":"2025-06-01T00:00:00Z","password":"PW-secret-b1-older"}] else . end) + [
   {"id":"k1a","type":1,"organizationId":null,"name":"Kay","notes":null,"folderId":null,"favorite":false,"reprompt":0,"creationDate":"2025-01-01T00:00:00Z","revisionDate":"2025-06-01T00:00:00Z","deletedDate":null,"fields":[],"login":{"username":"k@x.com","password":"PW-secret-k1-old","passwordRevisionDate":null,"totp":null,"fido2Credentials":[{"credentialId":"cred-k1","keyValue":"KEYDATA-k1","rpId":"k1.example.com"}],"uris":[{"match":null,"uri":"https://k1.example.com"}]}},
   {"id":"k1b","type":1,"organizationId":null,"name":"Kay","notes":null,"folderId":null,"favorite":false,"reprompt":0,"creationDate":"2026-04-01T09:30:00Z","revisionDate":"2026-04-02T00:00:00Z","deletedDate":null,"fields":[],"login":{"username":"k@x.com","password":"PW-secret-k1-new","passwordRevisionDate":null,"totp":null,"uris":[{"match":null,"uri":"https://k1.example.com"},{"match":null,"uri":"https://login.k1.example.com"}]}},
@@ -687,16 +752,19 @@ expect "$WORK/pk1.log" '^4 group\(s\) to change, 5 left alone, 1 for another sta
 for why in '2 different one-time-code seeds' '1 a custom field with different values' '1 a copy has password history the kept copy lacks' '1 the same URL with different match settings'; do
   expect "$WORK/pk1.log" "Left alone:.*$why" "different passwords plus another conflict stays left alone with that reason: $why"
 done
-expect "$WORK/pk1.log" '^ +1 +"Bank one" +folder: no folder +edited 2026-01-01 00:00, created 2025-12-01 00:00$' "a copy created after the other's last password change is listed first, dates in local time"
-expect "$WORK/pk1.log" '^ +2 +"Bank one" +folder: no folder +password changed 2025-06-01 00:00, edited 2026-02-01 00:00, created 2024-01-01 00:00 +\(kept entry\)$' "an older password change ranks second though edited later; every date bw reports is shown"
-expect "$WORK/pk1.log" '^ +1 +"Kay" .*edited 2026-04-02 00:00, created 2026-04-01 09:30$' "a never-changed password ranks by its copy's creation date"
-expect "$WORK/pk1.log" '^ +1 +"Odd folder" +folder: no folder +password changed 2026-01-15 00:00.*\(kept entry\)$' "a recent password change ranks above copies created earlier"
+expect "$WORK/pk1.log" '^ +1 +"Bank one" +b1\.example\.com +folder: no folder +edited 2026-01-01 00:00, created 2025-12-01 00:00$' "a copy created after the other's last password change is listed first, dates in local time"
+expect "$WORK/pk1.log" '^ +2 +"Bank one" +b1\.example\.com +folder: no folder +password changed 2025-06-01 00:00, edited 2026-02-01 00:00, created 2024-01-01 00:00 +\(kept entry\)$' "an older password change ranks second though edited later; every date bw reports is shown"
+expect "$WORK/pk1.log" '^ +1 +"Kay" +k1\.example\.com, login\.k1\.example\.com +folder: .*edited 2026-04-02 00:00, created 2026-04-01 09:30$' "a never-changed password ranks by its copy's creation date; each copy shows its addresses"
+expect "$WORK/pk1.log" '^\[[0-9]/[0-9]\] example.com \(k@x.com\), 2 copies with different passwords$' "a pick group says what differs"
+[ "$(grep -A1 '^\[[0-9]/[0-9]\] example.com (k@x.com)' "$WORK/pk1.log" | tail -1)" = "  These may be separate accounts. If they are, press Enter to keep both." ] || { echo "FAIL copies saved for different addresses must be flagged as maybe separate accounts"; exit 1; }
+[ "$(grep -c 'These may be separate accounts' "$WORK/pk1.log")" = "1" ] || { echo "FAIL only the group whose copies have different addresses may be separate accounts"; exit 1; }
+expect "$WORK/pk1.log" '^ +1 +"Odd folder" +s1\.example\.com +folder: no folder +password changed 2026-01-15 00:00.*\(kept entry\)$' "a recent password change ranks above copies created earlier"
 expect "$PLANS/plan-pick.md" '^\| example.com \(k@x.com\) \| 2 \|.*\| the password you choose; \+1 URL' "the pick plan says what the kept copy gains besides the password"
 expect "$WORK/pk1.log" '^ +2 +"Kay" .*\(kept entry, holds a passkey\)$' "the passkey copy is the kept entry even with the older password"
 expect "$WORK/pk1.log" 'Nothing was changed' "a pick dry run changes nothing"
 cmp -s "$WORK/state-pick.json" "$WORK/state-pick-before.json" && ! grep -qE '^(edit|delete) ' "$WORK/bw-pick.log" || { echo "FAIL a pick dry run changed the vault"; exit 1; }
 PICK_TZ=America/New_York pick "$WORK/tty-no" "$WORK/pk5.log" || { cat "$WORK/pk5.log"; echo "FAIL pick dry run in New York time"; exit 1; }
-expect "$WORK/pk5.log" '^ +1 +"Bank one" +folder: no folder +edited 2025-12-31 19:00, created 2025-11-30 19:00$' "dates are shown in the person's own time zone"
+expect "$WORK/pk5.log" '^ +1 +"Bank one" +b1\.example\.com +folder: no folder +edited 2025-12-31 19:00, created 2025-11-30 19:00$' "dates are shown in the person's own time zone"
 
 printf '9\n\n3\n\n' >"$WORK/tty-skip"
 pick "$WORK/tty-skip" "$WORK/pk2.log" --apply || { cat "$WORK/pk2.log"; echo "FAIL skipping every group must end cleanly"; exit 1; }
@@ -707,10 +775,10 @@ expect "$WORK/pk2.log" 'No group was chosen. Nothing was changed.' "skipping eve
 printf '0\n3\n\n' >"$WORK/tty-edges"
 pick "$WORK/tty-edges" "$WORK/pk2b.log" --apply || { cat "$WORK/pk2b.log"; echo "FAIL edge answers must end cleanly"; exit 1; }
 [ "$(grep -o 'not one of the numbers shown' "$WORK/pk2b.log" | wc -l | tr -d ' ')" = "2" ] || { cat "$WORK/pk2b.log"; echo "FAIL 0, and one past the last copy, must each be refused"; exit 1; }
-expect "$WORK/pk2b.log" 'or press Enter to skip: Skipped\.$' "Enter skips with its own message"
+expect "$WORK/pk2b.log" 'or press Enter to keep both as they are: Kept both\. Nothing changes for this group\.$' "Enter keeps both copies, and says so"
 printf '\n' >"$WORK/tty-enter"
 pick "$WORK/tty-enter" "$WORK/pk6.log" --apply --limit 1 || { cat "$WORK/pk6.log"; echo "FAIL pick apply 1"; exit 1; }
-[ "$(grep -o 'press Enter to skip: ' "$WORK/pk6.log" | wc -l | tr -d ' ')" = "1" ] || { echo "FAIL apply 1 must ask about one group only"; exit 1; }
+[ "$(grep -o 'press Enter to keep both as they are: ' "$WORK/pk6.log" | wc -l | tr -d ' ')" = "1" ] || { echo "FAIL apply 1 must ask about one group only"; exit 1; }
 printf '1\n1\n\n1\nno\n' >"$WORK/tty-pick-no"
 if pick "$WORK/tty-pick-no" "$WORK/pk3.log" --apply; then echo "FAIL pick went ahead without the confirmation word"; exit 1; fi
 expect "$WORK/pk3.log" 'This will edit 2 kept copies and move 3 copies to the Bitwarden trash' "pick states the edits and the trashing before the confirmation"
@@ -917,7 +985,7 @@ expect "$WORK/mu1.log" "A summary to share with family \(counts only: no site, u
 expect "$WORK/mu1.log" "These files are mom's. Import them only into the vault of mom@example.com" "the import step names the vault the files are for"
 [ "$(ls "$MOM/Reports" | tr '\n' '|' | sed -E 's/[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{6}/STAMP/')" = "Bitwarden Report - mom STAMP.html|Bitwarden Summary - mom.html|progress.json|" ] || { echo "FAIL mom's Reports folder must hold one dated report, the summary and the progress file"; ls "$MOM/Reports" || true; exit 1; }
 expect "$(newest_report "$MOM")" 'Logins with a password: 5 ·' "mom's report is her vault, in her own Reports folder"
-expect "$(newest_report "$MOM")" '<strong>First check-up of this vault on this Mac: [0-9]+ entries flagged\.</strong>' "a first report says it is the first"
+expect "$(newest_report "$MOM")" '<strong>First check-up of this vault on this Mac: [0-9]+ sites? needs? work\.</strong>' "a first report says it is the first"
 [ "$(stat -f %Lp "$MOM/Reports")$(stat -f %Lp "$(newest_report "$MOM")")$(stat -f %Lp "$MOM/Reports/progress.json")" = "700600600" ] || { echo "FAIL the Reports folder, the report and the progress file must be owner-only"; exit 1; }
 [ "$(tail -1 "$WORK/mu1.log")" = "==> Done. The report is open in your browser. It is kept in $MOM/Reports, not on the Desktop. Your vault is locked again." ] || { tail -2 "$WORK/mu1.log"; echo "FAIL the closing line must say where the report is kept"; exit 1; }
 [ ! -e "$MU_APP/data" ] && [ ! -e "$MU_APP/Bitwarden Import" ] && [ ! -e "$MU_APP/Reports" ] && [ -z "$(ls -A "$MU_HOME/Desktop")" ] || { echo "FAIL a profile run wrote to the shared sign-in, import folder or reports, or to the Desktop"; exit 1; }
@@ -968,7 +1036,7 @@ bw_calls_since "$CALLS" | grep -qx 'profiles/mom/data unlock --raw' && ! bw_call
 expect "$WORK/mu3.log" '^  1  Old Passwords.csv ' "with only an old export left, it is still listed, never taken silently"
 expect "$WORK/mu3.log" 'each file that is mom' "the question names the profile"
 expect "$WORK/mu3.log" 'Done. The report is open in your browser' "the run itself finished"
-expect "$(newest_report "$MOM")" '<strong>0 fixed since [0-9-]+, [0-9]+ left\.</strong>' "a second report compares with the first"
+expect "$(newest_report "$MOM")" '<strong>0 fixed since [0-9-]+, [0-9]+ sites? left, 0 new\.</strong>' "a second report compares with the first"
 expect "$WORK/mu3.log" "Removed 2 older report\(s\) from $MOM/Reports. The newest 10 are kept" "older reports are removed and counted"
 [ "$(ls "$MOM/Reports"/Bitwarden\ Report*.html | wc -l | tr -d ' ')" = "10" ] && [ ! -e "$MOM/Reports/Bitwarden Report - mom 2020-01-02 000000.html" ] && [ -e "$MOM/Reports/Bitwarden Report - mom 2020-01-03 000000.html" ] || { ls "$MOM/Reports"; echo "FAIL the newest 10 reports must be kept and the oldest removed"; exit 1; }
 [ -f "$MOM/Reports/my notes.txt" ] && [ -f "$MOM/Reports/progress.json" ] && [ -f "$MOM/Reports/Bitwarden Summary - mom.html" ] && [ "$(snapshot "$DAD")" = "$DAD_BEFORE" ] || { echo "FAIL clearing old reports touched something that is not one of this person's reports"; exit 1; }

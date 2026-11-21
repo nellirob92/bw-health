@@ -31,13 +31,21 @@ Work that was considered and left out, with the reason.
   domain, from the pinned public suffix list); `bw_import_diff.py` still compares an export row with the
   vault by host and username, so `secure01.bank.com` in Chrome and `www.bank.com` in the vault are listed
   as new. Moving it to the same site key changes what gets imported, so it needs its own release.
-- **Done ticks after a browser restart.** The ticks live in the browser's storage for the report's
-  `file://` page. Chrome keeps them; whether Safari keeps them after quitting, and whether each dated report
-  shares them, has not been tried.
+- **Done ticks after quitting Safari.** The ticks live in the browser's storage for the report's
+  `file://` page. Tried on macOS 27.2: Chrome 157 keeps them after quitting, and every report file shares
+  them; Safari 27.2 keeps them between tabs and shares them across report files, but keeping them after
+  quitting Safari has not been tried.
 - **Whether iPhone AutoFill then offers a login** that the AutoFill fix gave an `https://` address. The
   fix is read back from Bitwarden; what the phone does with it has not been checked.
 - **Refreshing the public suffix list.** `public_suffix_list.dat` is a pinned copy and goes stale slowly
   (new shared endings). It is updated by hand, with a new checksum and `VERSION`; nothing reminds anyone.
+- **Copies of 1.0.0's files left in the shared bw-health folder.** 1.0.0 fetched its scripts into the
+  shared application folder; 1.1.0 fetches into a per-run folder and neither uses nor removes those old
+  copies. They hold no vault data. Removing them is left to a later release or by hand.
+- **Username capitals.** A site's key lowercases the username, so `Member` and `member` are one account.
+  A site where capitals make two accounts would be grouped as one; none is known.
+- **A masked username that fits two accounts** stays its own row; the report cannot say which account it
+  belongs to, and nothing offers to fill in the real username.
 - **The shareable summary is replaced on every run**, never kept per date. A family member who wants the
   last one keeps their own copy.
 

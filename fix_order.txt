@@ -4,8 +4,12 @@
 #
 #   <tier> <domain>          a site, and every address under it: "1 google.com" also covers
 #                            accounts.google.com, but not google.example.com
+#   <tier> .<ending>         every address ending in it: "1 .gov" covers ssa.gov and irs.gov.
+#                            A domain line wins over an ending line.
 #   <tier> folder: <name>    every login kept in a Bitwarden folder with exactly this name
-#                            (capitals do not matter). A folder line wins over a domain line.
+#                            (capitals do not matter). A folder line wins over the others.
+#
+# This file is the one place the kinds of site are decided; the report names each tier.
 #
 # The two-step login check uses the domain lines too. A login whose address sits under a domain
 # listed here is compared with the public 2FA Directory list as that whole site, so
@@ -15,8 +19,9 @@
 # site's other addresses.
 #
 # Tiers:
-#   1  email, and Apple, Google and Microsoft accounts (they reset every other password)
-#   2  money: banks, cards, brokerages, payment apps, Amazon, PayPal, tax, government benefits
+#   1  email, and Apple, Google and Microsoft accounts (they reset every other password), and
+#      identity: every .gov site, login.gov and id.me (they prove who you are)
+#   2  money: banks, cards, brokerages, payment apps, Amazon, PayPal, tax software
 #   3  phone carrier, utilities, insurance, health portals
 #   4  gaming and social
 #   5  everything else (any site not listed here)
@@ -33,7 +38,9 @@
 4 folder: Games
 4 folder: Social
 
-# --- 1: email, Apple, Google, Microsoft ------------------------------------------------------
+# --- 1: email, Apple, Google, Microsoft, identity --------------------------------------------
+1 .gov
+1 id.me
 1 google.com
 1 gmail.com
 1 googlemail.com
@@ -111,13 +118,6 @@
 2 zellepay.com
 2 wise.com
 2 amazon.com
-2 irs.gov
-2 id.me
-2 login.gov
-2 ssa.gov
-2 medicare.gov
-2 treasurydirect.gov
-2 studentaid.gov
 2 intuit.com
 2 turbotax.com
 2 hrblock.com
@@ -176,7 +176,6 @@
 3 kp.org
 3 deltadental.com
 3 vsp.com
-3 healthcare.gov
 3 mychart.org
 3 mychart.com
 3 followmyhealth.com

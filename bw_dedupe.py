@@ -41,9 +41,10 @@ import hashlib
 import ipaddress
 import json
 import os
+import re
 import subprocess
 import sys
-from collections import Counter
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import cache
@@ -58,6 +59,9 @@ SUFFIX_LIST_MIN_RULES = 5000  # the real list has about 10,000; far fewer means 
 WEB_SCHEMES = ("http", "https")
 NOTE_SEPARATOR = "\n\n--- merged from a duplicate entry ---\n\n"
 DIFFERENT_PASSWORDS = "different passwords"
+MASKED_COPY = "a copy's username is masked with *"  # the pick stage handles it: never merged on its own
+MASK = "*"
+WEB_HOST = re.compile(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+")  # labels, none empty
 
 
 def run_bw(*args: str, stdin: str | None = None) -> str:
@@ -164,13 +168,24 @@ def is_device(host: str) -> bool:
     return is_ip(host) or host == "localhost" or "." not in host or host.endswith(HOME_NETWORK_ENDINGS)
 
 
+def is_web_address(uri: str) -> bool:
+    """An address a browser can open: http://, https:// or no scheme, and a host that is a device or whole labels."""
+    parts = parse_uri(uri)
+    return parts is not None and parts[0] in WEB_SCHEMES and (is_device(parts[1]) or bool(WEB_HOST.fullmatch(ascii_host(parts[1]))))
+
+
+def broken_web_address(uri: str) -> bool:
+    """Written as a web address (http://, https:// or no scheme) but not one: a host like ".something", or malformed."""
+    raw = uri.strip().lower()
+    return (raw.split("://", 1)[0] if "://" in raw else "https") in WEB_SCHEMES and not is_web_address(uri)
+
+
 def site_of(uri: str) -> str:
     """The site a saved address belongs to. A web address is its registrable domain, without www. or a page;
-    a device keeps its host and port, never split into labels; an app or malformed address is itself."""
-    parts = parse_uri(uri)
-    if parts is None or parts[0] not in WEB_SCHEMES:
+    a device keeps its host and port, never split into labels; an app, malformed or broken address is itself."""
+    if not is_web_address(uri):
         return uri.strip().lower().rstrip("/")
-    _, host, port = parts
+    _, host, port = parse_uri(uri)
     if is_device(host):
         return host + (f":{port}" if port else "")
     return suffix_list().registrable(ascii_host(host))
@@ -178,7 +193,7 @@ def site_of(uri: str) -> str:
 
 def first_site_uri(uris: list[str]) -> str | None:
     """The address that names a login's site: its first web address, or its first address when it has none."""
-    web = [u for u in uris if (p := parse_uri(u)) and p[0] in WEB_SCHEMES]
+    web = [u for u in uris if is_web_address(u)]
     return (web or uris or [None])[0]
 
 
@@ -190,11 +205,41 @@ def login_of(item: dict) -> dict:
     return item.get("login") or {}
 
 
-def account_key(item: dict) -> str | None:
-    """Same site + username (case-insensitive) is one account; a login missing either stands alone (None)."""
+def mask_fits(masked: str, username: str) -> bool:
+    """A masked username (some letters shown as *) could be this one: same length, every shown letter in its place."""
+    return len(masked) == len(username) and all(m == MASK or m.lower() == c.lower() for m, c in zip(masked, username))
+
+
+def account_keys(items: list[dict]) -> dict[str, str]:
+    """Item id -> its account: same site + username (case-insensitive). A login missing either has none and stands alone.
+    A masked username that fits exactly one unmasked username on the same site joins that account as a masked copy;
+    fitting none or several, it stays its own account."""
+    keys: dict[str, str] = {}
+    masked: dict[str, tuple[str, str]] = {}
+    plain: dict[str, set[str]] = defaultdict(set)
+    for i in items:
+        username = login_of(i).get("username") or ""
+        first = first_site_uri(uri_strings(i))
+        if i.get("type") != LOGIN_TYPE or not (first and username):
+            continue
+        site = site_of(first)
+        keys[i["id"]] = f"{site}|{username.lower()}"
+        if not i.get("deletedDate"):
+            if MASK in username:
+                masked[i["id"]] = (site, username)
+            else:
+                plain[site].add(username.lower())
+    for item_id, (site, username) in masked.items():
+        fits = {u for u in plain[site] if mask_fits(username, u)}
+        if len(fits) == 1:
+            keys[item_id] = f"{site}|{fits.pop()}"
+    return keys
+
+
+def is_masked_copy(item: dict, account: str) -> bool:
+    """A copy whose masked username was matched to the account's unmasked one."""
     username = login_of(item).get("username") or ""
-    first = first_site_uri(uri_strings(item))
-    return f"{site_of(first)}|{username.lower()}" if first and username else None
+    return MASK in username and username.lower() != account.partition("|")[2]
 
 
 def uri_key(u: dict, loose: bool = False) -> str:
@@ -255,7 +300,7 @@ def passkey_ids(item: dict) -> list[tuple[str, str]]:
                   for c in passkeys(item))
 
 
-def blocker(items: list[dict]) -> str | None:
+def blocker(items: list[dict], keeper: dict, masked: list[dict]) -> str | None:
     """Why this group must be left alone, or None when it is safe to act on."""
     if any(i.get("organizationId") for i in items):
         return "shared with an organization"
@@ -272,8 +317,9 @@ def blocker(items: list[dict]) -> str | None:
         for f in i.get("fields") or []:
             if seen.setdefault((f.get("name"), f.get("type")), f.get("value")) != f.get("value"):
                 return "a custom field with different values"
+    if any(passkeys(i) for i in masked):
+        return "the copy with a masked username holds a passkey"  # the kept copy must be the passkey's, with the masked name
     # bw edit keeps the item's own password history and discards the history it is sent, so a copy's history cannot be carried over
-    keeper = pick_keeper(items)
     kept_history = {json.dumps(h, sort_keys=True) for h in keeper.get("passwordHistory") or []}
     if any(json.dumps(h, sort_keys=True) not in kept_history
            for i in items if i is not keeper for h in i.get("passwordHistory") or []):
@@ -284,9 +330,14 @@ def blocker(items: list[dict]) -> str | None:
             matches.setdefault(uri_key(u, loose=True), set()).add(str(u.get("match")))
     if any(len(m) > 1 for m in matches.values()):
         return "the same URL with different match settings"
+    if masked:
+        return MASKED_COPY  # the pick stage handles it, as it does different passwords: a person decides
     if len({pw for i in items if (pw := login_of(i).get("password"))}) > 1:  # an empty password is a gap, not a conflict
         return DIFFERENT_PASSWORDS  # checked last, so this reason means the pick stage can handle the group
     return None
+
+
+PICK_REASONS = (DIFFERENT_PASSWORDS, MASKED_COPY)
 
 
 def pick_keeper(items: list[dict]) -> dict:
@@ -347,17 +398,19 @@ class Group:
 
 
 def find_groups(items: list[dict]) -> list[Group]:
+    keys = account_keys(items)
     by_account: dict[str, list[dict]] = {}
     for i in items:
-        if i.get("type") == LOGIN_TYPE and not i.get("deletedDate") and account_key(i):
-            by_account.setdefault(account_key(i), []).append(i)
+        if i.get("type") == LOGIN_TYPE and not i.get("deletedDate") and i["id"] in keys:
+            by_account.setdefault(keys[i["id"]], []).append(i)
     groups = []
     for account, members in sorted(by_account.items()):
         if len(members) < 2:
             continue
-        keeper = pick_keeper(members)
+        masked = [m for m in members if is_masked_copy(m, account)]
+        keeper = pick_keeper([m for m in members if m not in masked])  # the kept copy keeps the real username
         others = [m for m in members if m["id"] != keeper["id"]]
-        g = Group(account, keeper, others, blocked=blocker(members))
+        g = Group(account, keeper, others, blocked=blocker(members, keeper, masked))
         g.exact = len({fingerprint(m) for m in members}) == 1
         if not g.blocked and not g.exact:
             merged = merge_into(keeper, others)
@@ -394,8 +447,8 @@ def find_fixes(items: list[dict]) -> tuple[list[Group], list[Group]]:
             g.blocked = "shared with an organization"
         elif passkeys(i):
             g.blocked = "holds a passkey: add its https:// address by hand in Bitwarden"
-        elif any(parse_uri(u) is None for u in uri_strings(i)):
-            g.blocked = "an address that cannot be read: correct it by hand in Bitwarden"
+        elif any(broken_web_address(u) for u in uri_strings(i)):
+            g.blocked = "an address that isn't a web address: correct it by hand in Bitwarden"
         else:  # a device's address (a router beside the website) gets no https:// twin
             merged = copy.deepcopy(i)
             uris = login_of(merged)["uris"]
@@ -408,8 +461,8 @@ def find_fixes(items: list[dict]) -> tuple[list[Group], list[Group]]:
 def select(groups: list[Group], stage: str) -> tuple[list[Group], list[Group], int]:
     """(groups this stage acts on, groups left alone, groups waiting for another stage)."""
     if stage == "pick":
-        acting = [g for g in groups if g.blocked == DIFFERENT_PASSWORDS]
-        blocked = [g for g in groups if g.blocked and g.blocked != DIFFERENT_PASSWORDS]
+        acting = [g for g in groups if g.blocked in PICK_REASONS]
+        blocked = [g for g in groups if g.blocked and g.blocked not in PICK_REASONS]
     else:  # merge takes every group that is safe to merge, the identical ones included
         acting = [g for g in groups if not g.blocked and (stage == "merge" or g.exact)]
         blocked = [g for g in groups if g.blocked]
@@ -542,26 +595,46 @@ def render_preview(groups: list[Group], total: int, folders: dict[str, str]) -> 
     return "\n".join(lines)
 
 
+def addresses(item: dict) -> str:
+    """A copy's hosts, without www., a page or a query string (it can carry a token)."""
+    hosts = []
+    for u in uri_strings(item):
+        p = parse_uri(u)
+        host = (p[1][4:] if p[1].startswith("www.") else p[1]) + (f":{p[2]}" if p[2] else "") if p and p[0] in WEB_SCHEMES else clean(u.split("?")[0])
+        hosts += [host] if host not in hosts else []
+    return ", ".join(hosts) or "no address"
+
+
+def may_be_separate(g: Group) -> bool:
+    """Copies saved for different addresses on one site, or under a masked username, may be two accounts, not one."""
+    return g.blocked == MASKED_COPY or len({addresses(i) for i in [g.keeper, *g.others]}) > 1
+
+
 def render_choices(g: Group, copies: list[dict], n: int, total: int, folders: dict[str, str]) -> str:
-    """A pick group's copies, numbered newest password first, with their dates in local time and the kept entry marked."""
-    lines = [f"[{n}/{total}] {g.label}, {len(copies)} copies with different passwords"]
+    """A pick group's copies, numbered newest password first, each with its addresses and its dates in local time."""
+    what = "copies, one with a masked username" if g.blocked == MASKED_COPY else "copies with different passwords"
+    lines = [f"[{n}/{total}] {g.label}, {len(copies)} {what}"]
+    if may_be_separate(g):
+        lines.append("  These may be separate accounts. If they are, press Enter to keep both.")
     for k, item in enumerate(copies, start=1):
         dates = ", ".join(f"{label} {d.astimezone():%Y-%m-%d %H:%M}" for label, d in item_dates(item) if d)
         mark = "" if item is not g.keeper else "  (kept entry, holds a passkey)" if passkeys(item) else "  (kept entry)"
-        lines.append(f'  {k}  "{clean(item.get("name") or "(no name)")}"  folder: {folder_name(item, folders)}  {dates}{mark}')
+        masked = "  (masked username)" if is_masked_copy(item, g.account) else ""
+        lines.append(f'  {k}  "{clean(item.get("name") or "(no name)")}"  {addresses(item)}  folder: {folder_name(item, folders)}  '
+                     f'{dates}{mark}{masked}')
     return "\n".join(lines)
 
 
 def choose_passwords(groups: list[Group], folders: dict[str, str]) -> list[Group]:
-    """Asks, group by group, which copy's password works. Enter, or anything but a listed number, skips the group."""
+    """Asks, group by group, which copy's password works. Enter keeps both; anything but a listed number skips the group."""
     chosen = []
     for n, g in enumerate(groups, start=1):
         copies = by_newest_password(g)
         print(render_choices(g, copies, n, len(groups), folders))
         answer = ask("Type the number of the copy whose password works (1 is the newest; the number, not the password), "
-                     "or press Enter to skip: ")
+                     "or press Enter to keep both as they are: ")
         if not answer:
-            print("Skipped.\n")
+            print("Kept both. Nothing changes for this group.\n")
         elif answer not in {str(k) for k in range(1, len(copies) + 1)}:
             print("That is not one of the numbers shown, so this group is skipped.\n")  # never echoed: it could be a password
         elif not login_of(copies[int(answer) - 1]).get("password"):
@@ -756,8 +829,9 @@ def main() -> None:
     if blocked:
         reasons = Counter(g.blocked for g in blocked)
         print("Left alone: " + ", ".join(f"{n} {why}" for why, n in reasons.most_common()) + ".")
-        if DIFFERENT_PASSWORDS in reasons:
-            print(f"Groups with {DIFFERENT_PASSWORDS}: dedupe pick shows each copy's dates and lets you choose the password to keep.")
+        if set(PICK_REASONS) & set(reasons):
+            print("Groups with different passwords or a masked username: dedupe pick shows each copy's addresses and dates "
+                  "and lets you choose the password to keep, or keep both.")
 
     if not args.apply:
         sample = acting[:3]

@@ -62,12 +62,12 @@ TIER_NAMES = {1: "Email & main accounts", 2: "Money & shopping", 3: "Phone, util
 LAST_TIER = 5
 
 # The reasons an item can be flagged, as kept in the progress file.
-EXPOSED, REUSED, WEAK, DUPLICATE, TWOFA, AUTOFILL, OLD, NOTES = (
-    "exposed", "reused", "weak", "duplicate", "two-step", "autofill", "old", "notes")
-# Worst first: a site's problems roll up to its worst, and the fix list is sorted by it.
-SEVERITY = [EXPOSED, REUSED, WEAK, OLD, DUPLICATE, TWOFA, AUTOFILL]
+EXPOSED, REUSED, WEAK, DUPLICATE, TWOFA, AUTOFILL, OLD, NOTES, MASKED = (
+    "exposed", "reused", "weak", "duplicate", "two-step", "autofill", "old", "notes", "masked")
+# Worst first, the order chips are shown in. A site's urgency (Site.urgency) ranks the fix list.
+SEVERITY = [EXPOSED, REUSED, WEAK, OLD, DUPLICATE, MASKED, TWOFA, AUTOFILL]
 NEEDS_NEW_PASSWORD = {EXPOSED, REUSED, WEAK}
-CHIP_WORDS = {EXPOSED: "Exposed", REUSED: "Reused", WEAK: "Weak", OLD: "Old", DUPLICATE: "Duplicate",
+CHIP_WORDS = {EXPOSED: "Exposed", REUSED: "Reused", WEAK: "Weak", OLD: "Old", DUPLICATE: "Duplicate", MASKED: "Masked",
               TWOFA: "Two-step", AUTOFILL: "AutoFill", "new": "NEW"}
 
 # How a login was matched to the 2FA Directory list: its own address is listed, or only a related one is.
@@ -94,9 +94,10 @@ def suffixes(host: str) -> list[str]:
 
 @dataclass
 class FixOrder:
-    """fix_order.txt: which sites, and which Bitwarden folders, are fixed first."""
+    """fix_order.txt: which sites, and which Bitwarden folders, are fixed first. The one place the kinds of site are decided."""
     domains: dict[str, int]
     folders: dict[str, int]  # lower-case folder name -> tier
+    endings: dict[str, int]  # a top-level ending such as "gov" -> tier; a domain line wins over it
 
     def listed(self, host: str) -> str | None:
         return next((s for s in suffixes(host) if s in self.domains), None)
@@ -106,7 +107,9 @@ class FixOrder:
         domain it equals or sits under, so mail.google.com is google.com and gmail.example.com is nothing."""
         if folder is not None and folder.strip().lower() in self.folders:
             return self.folders[folder.strip().lower()]
-        return min((self.domains[d] for h in hosts if (d := self.listed(h))), default=LAST_TIER)
+        listed = [self.domains[d] for h in hosts if (d := self.listed(h))]
+        ending = [self.endings[e] for h in hosts if (e := h.lower().rpartition(".")[2]) in self.endings and "." in h]
+        return min(listed or ending or [LAST_TIER])
 
     def site(self, host: str) -> str:
         """The listed domain a host belongs to, or the host itself: accounts.google.com is google.com."""
@@ -114,7 +117,7 @@ class FixOrder:
 
 
 def load_fix_order(path: Path) -> FixOrder:
-    order = FixOrder({}, {})
+    order = FixOrder({}, {}, {})
     for n, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
         line = raw.strip()
         if not line or line.startswith("#"):
@@ -122,11 +125,15 @@ def load_fix_order(path: Path) -> FixOrder:
         tier, _, rest = line.partition(" ")
         rest = rest.strip()
         if tier not in {str(t) for t in TIER_NAMES} or not rest:
-            sys.exit(f"{path} line {n}: expected a tier from 1 to {LAST_TIER}, a space, then a domain or 'folder: name'")
+            sys.exit(f"{path} line {n}: expected a tier from 1 to {LAST_TIER}, a space, then a domain, an ending like .gov or 'folder: name'")
         if rest.lower().startswith("folder:"):
             table, key = order.folders, rest[len("folder:"):].strip().lower()
             if not key:
                 sys.exit(f"{path} line {n}: 'folder:' needs a folder name after it")
+        elif rest.startswith("."):
+            table, key = order.endings, rest[1:].lower()
+            if not re.fullmatch(r"[a-z]{2,}", key):
+                sys.exit(f"{path} line {n}: '{rest}' is not a top-level ending like .gov")
         else:
             table, key = order.domains, rest.lower()
             if not SAFE_HOST.fullmatch(key):
@@ -205,6 +212,7 @@ class Login:
     created: datetime | None
     revised: str            # the item's last edit, as bw writes it
     has_passkey: bool
+    masked_copy: bool       # a masked username matched to one unmasked username on the site: shown on that account's row
 
 
 @dataclass
@@ -230,6 +238,7 @@ class Report:
     twofa: list[tuple[Login, str]] = field(default_factory=list)   # (login, SUPPORTS or LIKELY)
     twofa_skipped: str = ""    # why the two-step check did not run, or "" when it did
     autofill: list[tuple[Login, str]] = field(default_factory=list)
+    masked: list[Login] = field(default_factory=list)                # a masked username that fits no single real one
     fixable: set[str] = field(default_factory=set)                  # item ids `fixurls` would give an https:// address
     old: list[tuple[Login, datetime, str]] = field(default_factory=list)
     recently_added: int = 0
@@ -244,14 +253,15 @@ class Report:
                 (WEAK, [l.item_id for l, _, _ in self.weak]),
                 (DUPLICATE, [i["id"] for g in self.dupes for i in [g.keeper, *g.others]]),
                 (TWOFA, [l.item_id for l, _ in self.twofa]), (AUTOFILL, [l.item_id for l, _ in self.autofill]),
-                (OLD, [l.item_id for l, _, _ in self.old]), (NOTES, [hit.item_id for hit in self.notes])):
+                (OLD, [l.item_id for l, _, _ in self.old]), (NOTES, [hit.item_id for hit in self.notes]),
+                (MASKED, [l.item_id for l in self.masked])):
             for item_id in ids:
                 out[item_id].add(reason)
         return dict(out)
 
     def checks(self) -> set[str]:
         """The checks that ran, so a check that was skipped is never read as everything being fixed."""
-        ran = {REUSED, WEAK, DUPLICATE, AUTOFILL, OLD, NOTES}
+        ran = {REUSED, WEAK, DUPLICATE, AUTOFILL, OLD, NOTES, MASKED}
         if self.hibp_checked:
             ran.add(EXPOSED)
         if not self.twofa_skipped:
@@ -261,9 +271,14 @@ class Report:
 
 @dataclass
 class Progress:
+    """Item ids flagged then and now, on the checks that ran both times. The report turns them into sites."""
     since: str | None = None   # the date of the check-up before this one, None when there was none
-    fixed: int = 0
-    new: set[str] = field(default_factory=set)   # item ids flagged now that were not flagged then
+    before: set[str] = field(default_factory=set)
+    now: set[str] = field(default_factory=set)
+
+    @property
+    def new(self) -> set[str]:
+        return self.now - self.before
 
 
 def run_bw(*args: str) -> str:
@@ -316,6 +331,7 @@ def when(value: str | None) -> datetime | None:
 
 def to_logins(items: list[dict], order: FixOrder, folders: dict[str, str]) -> tuple[list[Login], int]:
     logins, no_password = [], 0
+    keys = dd.account_keys(items)
     for it in items:
         if it.get("type") != LOGIN_TYPE:
             continue
@@ -335,7 +351,7 @@ def to_logins(items: list[dict], order: FixOrder, folders: dict[str, str]) -> tu
             hosts=hosts,
             uris=uris,
             site=dd.site_of(first) if first else "",
-            key=dd.account_key(it) or f"item:{it['id']}",
+            key=keys.get(it["id"]) or f"item:{it['id']}",
             secure=any((p := dd.parse_uri(u)) is not None and p[0] == "https" for u in uris),
             password=pw,
             in_trash=bool(it.get("deletedDate")),
@@ -345,6 +361,7 @@ def to_logins(items: list[dict], order: FixOrder, folders: dict[str, str]) -> tu
             created=when(it.get("creationDate")),
             revised=it.get("revisionDate") or "",
             has_passkey=bool(dd.passkeys(it)),
+            masked_copy=it["id"] in keys and dd.is_masked_copy(it, keys[it["id"]]),
         ))
     return logins, no_password
 
@@ -378,6 +395,8 @@ def autofill_problem(l: Login) -> str | None:
     """A login AutoFill will not offer reliably. A device at home (a router) has no https:// page, so it is not flagged."""
     if not l.uris:
         return "no web address saved"
+    if not any(dd.is_web_address(u) for u in l.uris) and any(dd.broken_web_address(u) for u in l.uris):
+        return "address isn't a web address"
     if dd.http_only(l.uris) and not dd.on_devices(l.uris):
         return "only an http:// address saved"
     return None
@@ -441,6 +460,8 @@ def build(items: list[dict], order: FixOrder, folders: dict[str, str], check_hib
         problem = autofill_problem(l)
         if problem:
             rep.autofill.append((l, problem))
+        if dd.MASK in l.username and not l.masked_copy:
+            rep.masked.append(l)
         if l.created and now - l.created < RECENTLY_ADDED:
             rep.recently_added += 1  # an import or a new entry: its dates say nothing about the password's age yet
         elif (since := l.changed or l.created) and now - since >= OLD_AFTER:
@@ -483,7 +504,7 @@ def compare(previous: dict | None, rep: Report) -> Progress:
     common = set(previous["checks"]) & rep.checks()
     before = {item_id for item_id, reasons in previous["flagged"].items() if set(reasons) & common}
     now = {item_id for item_id, reasons in rep.flags().items() if reasons & common}
-    return Progress(previous["date"], len(before - now), now - before)
+    return Progress(previous["date"], before, now)
 
 
 # --- the sites: one per website + username, the unit every count and table uses ---------------------------
@@ -496,8 +517,9 @@ class Site:
 
     @property
     def main(self) -> Login:
-        """The copy the account link opens: the one the duplicate cleanup would keep (a passkey's, else the newest)."""
-        return max(self.logins, key=lambda l: (l.has_passkey, l.revised, l.item_id))
+        """The copy the account link opens: the one the duplicate cleanup would keep (never a masked copy; a passkey's,
+        else the newest)."""
+        return max(self.logins, key=lambda l: (not l.masked_copy, l.has_passkey, l.revised, l.item_id))
 
     @property
     def name(self) -> str:
@@ -515,6 +537,11 @@ class Site:
     @property
     def rank(self) -> int:
         return min((SEVERITY.index(p) for p in self.problems), default=len(SEVERITY))
+
+    @property
+    def urgency(self) -> int:
+        """0: a password exposed in a breach. 1: one reused or weak (it needs a new password). 2: the smaller fixes."""
+        return 0 if EXPOSED in self.problems else 1 if NEEDS_NEW_PASSWORD & set(self.problems) else 2
 
     @property
     def linkable(self) -> bool:
@@ -535,7 +562,8 @@ class Model:
 
     @property
     def to_fix(self) -> list[Site]:
-        return sorted((s for s in self.sites.values() if s.problems), key=lambda s: (s.tier, s.rank, s.name.lower(), s.key))
+        """Most urgent first; within one urgency, by kind of site (email and main accounts first), then the worst problem."""
+        return sorted((s for s in self.sites.values() if s.problems), key=lambda s: (s.urgency, s.tier, s.rank, s.name.lower(), s.key))
 
     @property
     def need_password(self) -> list[Site]:
@@ -579,6 +607,8 @@ def model_of(rep: Report) -> Model:
         mark(l.item_id, AUTOFILL)
     for l, _, _ in rep.old:
         mark(l.item_id, OLD)
+    for l in rep.masked:
+        mark(l.item_id, MASKED)
     return Model(rep, sites, labels)
 
 
@@ -602,6 +632,7 @@ SHAPES = {
     DUPLICATE: '<rect x=".7" y="3.2" width="5.6" height="5.6" fill="none" stroke="currentColor" stroke-width="1.3"/><rect x="3.7" y=".7" width="5.6" height="5.6" fill="currentColor"/>',
     TWOFA: '<circle cx="5" cy="5" r="4" fill="none" stroke="currentColor" stroke-width="1.4"/><circle cx="5" cy="5" r="1.7" fill="currentColor"/>',
     AUTOFILL: '<path d="M4 0h2v4h4v2H6v4H4V6H0V4h4Z" fill="currentColor"/>',
+    MASKED: '<path d="M5 .5v9M1.1 2.75l7.8 4.5M1.1 7.25l7.8-4.5" fill="none" stroke="currentColor" stroke-width="1.6"/>',
     "new": '<path d="m5 0 1.5 3.3 3.5.4-2.6 2.4.7 3.5L5 7.9 1.9 9.6l.7-3.5L0 3.7l3.5-.4Z" fill="currentColor"/>',
     "ok": '<path d="M1 5.2 4 8l5-6.5" fill="none" stroke="currentColor" stroke-width="1.8"/>',
     "tidy": '<rect x="1" y="1" width="8" height="8" fill="currentColor"/>',
@@ -640,13 +671,17 @@ def account_html(vault: str, login: Login, text: str | None = None) -> str:
 
 
 def copies_cell(vault: str, s: Site) -> str:
-    """How many copies, and, opened, each copy's addresses with a link to that copy."""
-    hosts = {h for l in s.logins for h in l.hosts}
-    if len(s.logins) == 1 and len(hosts) <= 1:
+    """How many copies, and, opened, one line per copy: its addresses, linked to that copy in Bitwarden, and the
+    username as saved only when it differs from the row's (capitals, or a masked copy)."""
+    if len(s.logins) == 1 and len(set(s.logins[0].hosts)) <= 1:
         return "1"
-    lines = "".join(f'<li>{account_html(vault, l, l.name)} <span class="muted">{esc(", ".join(l.hosts) or "no address")}</span></li>'
-                    for l in sorted(s.logins, key=lambda l: (l.hosts, l.item_id)))
-    return f'<details><summary>{len(s.logins)}</summary><ul class="hosts">{lines}</ul></details>'
+    lines = []
+    for l in sorted(s.logins, key=lambda l: (l is not s.main, l.hosts, l.item_id)):
+        hosts = ", ".join(dict.fromkeys(l.hosts)) or "no address"
+        saved = f' <span class="muted">saved as {esc(l.username)}</span>' if l.username != s.main.username else ""
+        masked = ' <span class="tag">masked copy</span>' if l.masked_copy else ""
+        lines.append(f"<li>{account_html(vault, l, hosts)}{saved}{masked}</li>")
+    return f'<details><summary>{len(s.logins)}</summary><ul class="hosts">{"".join(lines)}</ul></details>'
 
 
 def problem_chips(s: Site, new: bool) -> str:
@@ -726,8 +761,9 @@ def ring(work: int, total: int) -> str:
             f'stroke-dasharray="{part:.2f} {c:.2f}" transform="rotate(-90 60 60)"/>'
             f'<text x="60" y="62" text-anchor="middle" class="ring-num">{work}</text>'
             f'<text x="60" y="80" text-anchor="middle" class="ring-of">of {total} need work</text></svg>'
-            f'<figcaption><span class="key-work">{svg(EXPOSED)} thick: {work} need work</span>'
-            f'<span class="key-fine">{svg("ok")} thin: {total - work} with nothing to do</span></figcaption></figure>')
+            f'<figcaption><span class="legend"><svg class="sw" width="22" height="10" aria-hidden="true"><rect y="1" width="22" height="8" '
+            f'class="sw-work"/></svg>{work} need work</span><span class="legend"><svg class="sw" width="22" height="10" aria-hidden="true">'
+            f'<rect y="4" width="22" height="2" class="sw-fine"/></svg>{total - work} with nothing to do</span></figcaption></figure>')
 
 
 def bars(title: str, rows: list[tuple[str, str, int | None]]) -> str:
@@ -758,7 +794,7 @@ def dashboard(m: Model, for_summary: bool) -> str:
     ])
     headline = (f'<p class="headline"><strong>{need} of your {total} sites need a new password</strong>: the password is exposed '
                 f'in a breach, reused on another site, or weak. {plural(smaller, "more site needs", "more sites need")} a smaller '
-                f'fix: two-step login to check, an AutoFill address, a duplicate to merge or an old password. The other {fine} '
+                f'fix: two-step login to check, an AutoFill address, a duplicate to merge, a masked username or an old password. The other {fine} '
                 f'{"has" if fine == 1 else "have"} nothing to do. A site is one website and one username: copies of the same login, '
                 f'and its other addresses, count once.</p>')
     notes = f'<p class="muted">Separately, {plural(len(rep.notes), "note", "notes")} may hold a password.</p>' if rep.notes else ""
@@ -768,7 +804,7 @@ def dashboard(m: Model, for_summary: bool) -> str:
     tier_rows = [(f"{t} · {name}", "tier", sum(1 for s in m.to_fix if s.tier == t)) for t, name in TIER_NAMES.items()]
     return (f'<section class="dash">{ring(work, total)}<div class="lead">{headline}{notes}</div></section>'
             f'<div class="scores">{cards}</div><div class="charts">{bars("Sites per problem", problem_rows)}'
-            f'{bars("Sites to fix, by priority", tier_rows)}</div>')
+            f'{bars("Sites to fix, by kind of site", tier_rows)}</div>')
 
 
 # --- the report ------------------------------------------------------------------------------------------
@@ -790,7 +826,8 @@ def render(rep: Report, progress: Progress, vault_url: str, today: str, paste_li
     m = model_of(rep)
 
     def is_new(s: Site) -> bool:
-        return any(i in progress.new for i in s.ids)
+        """Flagged now, and none of its copies flagged last time."""
+        return bool(set(s.ids) & progress.now) and not set(s.ids) & progress.before
 
     def who(s: Site) -> str:
         return account_html(vault, s.main)
@@ -799,33 +836,42 @@ def render(rep: Report, progress: Progress, vault_url: str, today: str, paste_li
         return [(site_cell(s), s.name.lower()), (who(s), s.main.username.lower())]
 
     flagged = rep.flags()
+    left = len(m.to_fix)
     if progress.since is None:
-        progress_line = (f"<strong>First check-up of this vault on this Mac: {plural(len(flagged), 'entry', 'entries')} flagged.</strong> "
+        progress_line = (f"<strong>First check-up of this vault on this Mac: {plural(left, 'site needs', 'sites need')} work.</strong> "
                          "The next one will show what changed.")
+        entries = f"In Bitwarden entries: {len(flagged)} flagged."
     else:
-        new = f" {len(progress.new)} new since then, marked NEW." if progress.new else ""
-        progress_line = f"<strong>{progress.fixed} fixed since {esc(progress.since)}, {len(flagged)} left.</strong>{new}"
-    progress_line += ' <span class="muted">Counted in Bitwarden entries: one site can have several.</span>'
+        fixed = sum(1 for s in m.sites.values() if set(s.ids) & progress.before and not set(s.ids) & progress.now)
+        new_sites = sum(1 for s in m.to_fix if is_new(s))
+        progress_line = (f"<strong>{fixed} fixed since {esc(progress.since)}, {plural(left, 'site', 'sites')} left, {new_sites} new.</strong>"
+                         + (" New ones are marked NEW." if new_sites else ""))
+        entries = (f"In Bitwarden entries: {len(flagged)} flagged, {len(progress.before - progress.now)} fixed and "
+                   f"{len(progress.new)} new since {esc(progress.since)}.")
     totals = (f'<p class="totals muted">Logins with a password: {rep.total - rep.trashed} · In trash (ignored, empty it): '
-              f'{rep.trashed} · Logins with no password: {rep.no_password} · Distinct passwords reused: {len(rep.reused)}</p>')
+              f'{rep.trashed} · Logins with no password: {rep.no_password} · Distinct passwords reused: {len(rep.reused)} · {entries}</p>')
 
     parts = [f'<header><h1>Bitwarden check-up</h1><p class="date">Check-up of {esc(today)}.</p>'
              f'<p class="progress">{progress_line}</p></header>', dashboard(m, for_summary=False), totals]
     first = m.to_fix[:FIX_FIRST]
     if first:
         items = "".join(f"<li>{site_cell(s)} · {who(s)} {problem_chips(s, is_new(s))}</li>" for s in first)
-        parts.append(f'<section class="card" id="first"><h2>Fix these first</h2><p class="muted">The top {len(first)}, by priority '
-                     f'and then by how serious the problem is.</p><ol class="first">{items}</ol></section>')
+        parts.append(f'<section class="card" id="first"><h2>Fix these first</h2><p class="muted">The top {len(first)}: an exposed '
+                     f'password first, then a reused or weak one, then the smaller fixes; within each, by kind of site.</p>'
+                     f'<ol class="first">{items}</ol></section>')
     parts += ['<p class="help">Click a site to change its password (if you land on the home page, look under account settings). '
               'Click the account to open it in Bitwarden.</p>', TOOLS]
 
     # Everything to fix: one row per site.
     if m.to_fix:
         rows = [(s.ids, [(f"{s.tier} · {esc(TIER_NAMES[s.tier])}", s.tier), *where(s),
-                         (problem_chips(s, is_new(s)), s.rank), (copies_cell(vault, s), len(s.logins))]) for s in m.to_fix]
-        parts.append(section("fix", "Fix in this order", "<p>Email and main accounts first, then money and shopping, then phone, "
-                             "utilities, insurance and health, then gaming and social, then everything else.</p>",
-                             table("main", ["Priority", "Site", "Account", "Problems", "Copies"], rows)))
+                         (problem_chips(s, is_new(s)), s.urgency * 100 + s.rank), (copies_cell(vault, s), len(s.logins))]) for s in m.to_fix]
+        masked_note = ('<p class="muted">Masked: the username was saved with * in place of some letters (an export can do that), '
+                       'so this entry will not sign in until the real username is typed in Bitwarden.</p>') if rep.masked else ""
+        parts.append(section("fix", "Fix in this order", "<p>Most serious first: a password exposed in a breach, then one reused or "
+                             "weak, then the smaller fixes. Within each, email and main accounts first, then money and shopping, then "
+                             "phone, utilities, insurance and health, then gaming and social, then everything else.</p>",
+                             table("main", ["Kind of site", "Site", "Account", "Problems", "Copies"], rows), masked_note))
     else:
         parts.append(empty_card("fix", "Fix in this order", "Nothing found. Every live password is unique, strong and unseen in a breach."))
 
@@ -888,7 +934,7 @@ def render(rep: Report, progress: Progress, vault_url: str, today: str, paste_li
             s = m.sites.get(g.account)
             if not g.blocked:
                 safe, order_key = "Yes", 0
-            elif g.blocked == dd.DIFFERENT_PASSWORDS:
+            elif g.blocked in dd.PICK_REASONS:
                 safe, order_key = "Needs pick", 1
             else:
                 safe, order_key = f"No: {esc(g.blocked)}", 2
@@ -899,7 +945,8 @@ def render(rep: Report, progress: Progress, vault_url: str, today: str, paste_li
                f"code and custom fields to it, and moves the rest to Bitwarden's Trash for 30 days. See what it would do, changing "
                f"nothing: {command(paste_line, user, 'dedupe merge')}. Then act on one group first: "
                f"{command(paste_line, user, 'dedupe merge apply 1')}, and type DEDUPE when asked. \"Needs pick\" means the copies "
-               f"have different passwords: {command(paste_line, user, 'dedupe pick')} lets you choose the one that works.</p>")
+               f"have different passwords, or one copy's username is masked with *: {command(paste_line, user, 'dedupe pick')} "
+               f"shows each copy's addresses and dates, and lets you choose the password that works or keep both.</p>")
         parts.append(section("duplicates", "Duplicate entries", "<p>The same site and username saved more than once, usually one "
                              "copy from Apple and one from Chrome.</p>",
                              table("dupes", ["Site", "Account", "Copies", "Safe to merge?"], rows), how))
@@ -1023,7 +1070,7 @@ def render_summary(rep: Report, today: str, user: str) -> str:
         if here:
             what = ", ".join(f"{n} {CHIP_WORDS[p].lower()}" for p in SEVERITY if (n := sum(1 for s in here if p in s.problems)))
             risks.append(f"<li><strong>{esc(name)}:</strong> {plural(len(here), 'site needs', 'sites need')} work ({what}).</li>")
-    how = "".join(f"<li>{chip(p)} {HOW_USED[p]}</li>" for p in SEVERITY if m.with_problem(p))
+    how = "".join(f"<li>{chip(p)} {HOW_USED[p]}</li>" for p in SEVERITY if p in HOW_USED and m.with_problem(p))
     whose = f" for {esc(user)}" if user else ""
     body = (f'<header><h1>Bitwarden summary{whose}</h1><p class="date">Check-up of {esc(today)}. Counts only: no site, username '
             f'or password is on this page.</p></header>{dashboard(m, for_summary=True)}'
@@ -1045,11 +1092,11 @@ STYLE = """
 :root{--bg:#fbfbfa;--card:#fff;--ink:#1b1b1b;--muted:#5d5d5d;--line:#d9d9d6;--track:#e6e6e3;
 --red:#b3261e;--red-bg:#fde7e5;--orange:#a84f00;--orange-bg:#ffe9d6;--amber:#7d5b00;--amber-bg:#fff4cc;
 --gray:#4f5359;--gray-bg:#eceef0;--blue:#1d5fb4;--blue-bg:#e3eefc;--purple:#6b3fa0;--purple-bg:#efe6fa;
---brown:#6d4c33;--brown-bg:#f1e8e0;--green:#2e6b30;--tier:#5d6168}
+--brown:#6d4c33;--brown-bg:#f1e8e0;--teal:#0f6466;--teal-bg:#dcf1f1;--green:#2e6b30;--tier:#5d6168}
 @media (prefers-color-scheme:dark){:root{--bg:#161616;--card:#1f1f1f;--ink:#ececec;--muted:#a9a9a9;--line:#3a3a3a;--track:#333;
 --red:#ff9a91;--red-bg:#4a1d1a;--orange:#ffb36b;--orange-bg:#47290c;--amber:#f2cf5b;--amber-bg:#3f3407;
 --gray:#c4c8cd;--gray-bg:#2f3236;--blue:#8fbaf5;--blue-bg:#16304f;--purple:#cfa8f7;--purple-bg:#352349;
---brown:#dbb89a;--brown-bg:#3a2a1e;--green:#8fd18f;--tier:#b4b8bd}}
+--brown:#dbb89a;--brown-bg:#3a2a1e;--teal:#7fd3d3;--teal-bg:#123738;--green:#8fd18f;--tier:#b4b8bd}}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
 main{max-width:1100px;margin:0 auto;padding:24px 16px 48px}
@@ -1060,9 +1107,9 @@ p{margin:.4rem 0}.muted{color:var(--muted)}.date{color:var(--muted);margin:.1rem
 .dash{display:flex;gap:24px;align-items:center;flex-wrap:wrap;margin:16px 0}
 .lead{flex:1 1 300px}.headline{font-size:1.05rem}
 .ring{margin:0 auto;text-align:center}.ring figcaption{font-size:.8rem;color:var(--muted);display:flex;flex-direction:column}
-.ring-fine{stroke:var(--track)}.ring-work{stroke:var(--orange)}
+.ring-fine{stroke:var(--muted);stroke-opacity:.45}.ring-work{stroke:var(--orange)}
 .ring-num{font-size:30px;font-weight:700;fill:var(--ink)}.ring-of{font-size:9px;fill:var(--muted)}
-.key-work .i{color:var(--orange)}.key-fine .i{color:var(--green)}
+.legend{display:inline-flex;align-items:center;gap:6px;justify-content:center}.sw-work{fill:var(--orange)}.sw-fine{fill:var(--muted);fill-opacity:.45}
 .scores{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
 .score{background:var(--card);border:1px solid var(--line);border-left:6px solid var(--gray);border-radius:8px;padding:10px 12px;display:flex;flex-direction:column}
 .score .num{font-size:1.7rem;font-weight:700;line-height:1.2}.score .what{font-weight:600}.score .sub{font-size:.8rem;color:var(--muted)}
@@ -1079,13 +1126,14 @@ p{margin:.4rem 0}.muted{color:var(--muted)}.date{color:var(--muted);margin:.1rem
 .meter{background:var(--track);border-radius:4px;display:inline-block;width:90px;height:10px;vertical-align:middle;overflow:hidden}
 .fill,.mfill{display:block;height:100%}
 .f-exposed{background:var(--red)}.f-reused{background:var(--orange)}.f-weak{background:var(--amber)}.f-old{background:var(--brown)}
-.f-duplicate{background:var(--gray)}.f-two-step{background:var(--blue)}.f-autofill{background:var(--purple)}.f-tier{background:var(--tier)}
+.f-duplicate{background:var(--gray)}.f-two-step{background:var(--blue)}.f-autofill{background:var(--purple)}.f-masked{background:var(--teal)}.f-tier{background:var(--tier)}
 .bl .i{color:var(--ink)}
 .chip{display:inline-flex;align-items:center;gap:4px;font-size:.78rem;font-weight:600;padding:1px 7px;border-radius:999px;border:1px solid;white-space:nowrap;margin:1px 0}
 .c-exposed{color:var(--red);background:var(--red-bg)}.c-reused{color:var(--orange);background:var(--orange-bg)}
 .c-weak{color:var(--amber);background:var(--amber-bg)}.c-old{color:var(--brown);background:var(--brown-bg)}
 .c-duplicate{color:var(--gray);background:var(--gray-bg)}.c-two-step{color:var(--blue);background:var(--blue-bg)}
-.c-autofill{color:var(--purple);background:var(--purple-bg)}.c-new{color:var(--ink);background:var(--card);border-style:dashed}
+.c-autofill{color:var(--purple);background:var(--purple-bg)}.c-masked{color:var(--teal);background:var(--teal-bg)}
+.tag{font-size:.75rem;border:1px solid var(--line);border-radius:4px;padding:0 4px;margin-left:4px}.c-new{color:var(--ink);background:var(--card);border-style:dashed}
 .i{flex:none;vertical-align:-1px}a.v .i{margin-left:3px;color:var(--muted)}
 a{color:var(--blue)}a.v{color:inherit;text-decoration:none}a.v:hover,a.v:focus{text-decoration:underline}
 .help{font-weight:600;margin:16px 0 0}
@@ -1099,11 +1147,11 @@ details summary{cursor:pointer}ul.hosts{margin:.3rem 0;padding-left:1.1rem;font-
 ol.first{margin:.3rem 0;padding-left:1.4rem}ol.first li{margin:.25rem 0}
 .strength{display:inline-flex;gap:2px;vertical-align:middle}.seg{width:14px;height:10px;border:1px solid var(--amber);border-radius:2px}
 .seg.on{background:var(--amber)}
-.tools{display:flex;gap:16px;flex-wrap:wrap;align-items:center;margin:12px 0}.tools input[type=search]{font:inherit;padding:4px 8px}
+.tools{display:flex;gap:16px;flex-wrap:wrap;align-items:center;margin:12px 0}[hidden]{display:none!important}.tools input[type=search]{font:inherit;padding:4px 8px}
 code{font-size:.85rem;background:var(--track);padding:1px 4px;border-radius:4px;word-break:break-all}
 ul.how{padding-left:0;list-style:none}ul.how li{margin:.5rem 0}
 footer{margin-top:24px;font-size:.85rem}
-@media print{body{background:#fff;color:#000}.tools,.done-col{display:none!important}.card,.score,.bars{break-inside:avoid}
+@media print{body{background:#fff;color:#000;-webkit-print-color-adjust:exact;print-color-adjust:exact}.tools,.done-col{display:none!important}.card,.score,.bars{break-inside:avoid}
 a.v .i{display:none}main{padding:0}}
 """
 

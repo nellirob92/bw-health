@@ -28,7 +28,7 @@ Bitwarden asks for one. Nothing shows on the screen while you type the password.
 in your browser.
 
 The report is one page. At the top: how many sites need work, a ring and bars that count them by problem and
-by priority, and **Fix these first**, the ten most urgent. Below are the tables. Each problem is a chip with
+by kind of site, and **Fix these first**, the ten most urgent. Below are the tables. Each problem is a chip with
 its word (Exposed, Reused, Weak, ...), so nothing is told by color alone, and the page follows the Mac's dark
 mode, fits a phone and prints.
 
@@ -40,21 +40,27 @@ mode, fits a phone and prints.
   look under account settings). Click the account to open the entry in Bitwarden. A site, a device on your
   home network or an app saved with no `https://` address gets no link.
 - **Sort, filter, hide done.** Click a column to sort, type to filter, tick a row when it is done and hide
-  the done ones. The ticks are remembered in this browser only. Without JavaScript the page is plain tables.
+  the done ones. The ticks are remembered in this browser only (Safari and Chrome both keep them for a report
+  opened from the Mac). Without JavaScript the page is plain tables.
+- **Masked usernames.** An export can save a username with `*` in place of some letters. If what is left
+  fits exactly one other username on the same site (same length, same letters where shown), that entry is
+  listed on the account's row as a "masked copy", and the duplicate cleanup sends it to `dedupe pick`, never
+  to an automatic merge. Otherwise it is a row of its own with a "Masked" chip: type the real username in
+  Bitwarden.
 
 **This check only reads your vault.** It never merges, deletes or changes anything, and no password is
 ever shown. It locks your vault again when it finishes.
 
 | The report lists | Meaning |
 | --- | --- |
-| Fixed since last time | From the second run on: how many flagged entries were fixed, how many are left, and which sites are new (marked NEW). |
-| Fix in this order | Email and Apple, Google and Microsoft accounts first, then money, then phone, utilities, insurance and health, then gaming and social, then everything else. One row per site, with its problems and its number of copies. |
+| Fixed since last time | From the second run on, counted in sites: how many were fixed, how many are left, and how many are new (marked NEW). The counts of Bitwarden entries are in the small totals line. |
+| Fix in this order | Most serious first: an exposed password, then a reused or weak one, then the smaller fixes (two-step, AutoFill, duplicates, masked, old). Within each, by kind of site: email, identity (.gov, login.gov, id.me) and Apple, Google and Microsoft accounts first, then money, then phone, utilities, insurance and health, then gaming and social, then everything else. One row per site, with its problems and its number of copies. |
 | Exposed in a breach | The password appears in public breach lists. Only the first 5 characters of its SHA-1 hash leave your Mac (Have I Been Pwned's range check). |
 | Reused | The same password is used on more than one account. |
 | Weak | The password is short or predictable. |
-| Duplicate entries | The same site and username is saved more than once. "Safe to merge" says Yes, "Needs pick" (different passwords) or No with the reason, and the section gives the exact line to paste. |
+| Duplicate entries | The same site and username is saved more than once. "Safe to merge" says Yes, "Needs pick" (different passwords, or a masked copy) or No with the reason, and the section gives the exact line to paste. |
 | Two-step login | The site offers two-step login and no code is saved in the entry. Check that it is turned on at the site: the entry cannot show that. "Supports" means the saved address is on the public list; "likely supports" means only a related address is. If the list cannot be downloaded, the section says "not checked this run". |
-| AutoFill problems | The entry has no web address, or only an `http://` one, so AutoFill may not offer it on the secure page. A device at home (a router) is not flagged. The section says how many the [AutoFill fix](#fix-autofill-addresses) can do. |
+| AutoFill problems | The entry has no web address, only an `http://` one, or an address that isn't a web address (such as `.something`, with no real domain), so AutoFill may not offer it on the secure page. The last kind is never offered to the AutoFill fix: correct it by hand. A device at home (a router) is not flagged. The section says how many the [AutoFill fix](#fix-autofill-addresses) can do. |
 | Unchanged for 3+ years | The password has not changed in three years. Importing resets these dates, so right after an import the section reads "Checked on later runs". |
 | Notes that may hold a password | A note with a line like `password: ...`. Only the item's name is shown, never the note. |
 | Your Bitwarden account | Links to check that your Bitwarden email is verified and two-step login is on. The check-up cannot see either. |
@@ -140,9 +146,9 @@ curl -fsSL https://raw.githubusercontent.com/nellirob92/bw-health/v1.1.0/bw-heal
 | --- | --- |
 | `dedupe exact` | Preview: copies that are identical in every field. |
 | `dedupe merge` | Preview: copies with the same password (or a missing one), the identical ones included. This is the step the report's "Safe to merge: Yes" means. |
-| `dedupe pick` | Preview: copies whose only conflict is different passwords, each listed newest password first with its dates. |
+| `dedupe pick` | Preview: copies whose only conflict is different passwords, or a masked username, each listed newest password first with its addresses and dates. |
 | `dedupe exact apply` or `dedupe merge apply` | Acts on the preview, after you read the list and type `DEDUPE`. |
-| `dedupe pick apply` | Asks, group by group, which password works (type its number; Enter skips the group), then acts after `DEDUPE`. |
+| `dedupe pick apply` | Asks, group by group, which password works (type its number; Enter keeps both copies as they are), then acts after `DEDUPE`. |
 | `... apply 10` | Acts on only the first 10 groups. Start with `apply 1`. |
 
 **Same site.** Copies are of one login when they have the same username and the same site, read the way the
@@ -160,7 +166,9 @@ every edit the kept copy is read back from Bitwarden, and the run stops before t
 was saved differs from what was sent. The read-back can detect a damaged passkey but cannot undo it, so keep
 the original in Apple Passwords or Chrome until you have checked that entry in Bitwarden.
 
-**Different passwords (`dedupe pick`).** Copies are ranked by when their password was set: its last change,
+**Different passwords or a masked username (`dedupe pick`).** Each copy is shown with its addresses. When
+the copies were saved for different addresses, or one has a masked username, the list says they may be
+separate accounts: press Enter to keep both. Copies are ranked by when their password was set: its last change,
 or the copy's creation if Bitwarden never saw it change (an import), with the last edit breaking ties. Dates
 are shown in your local time. The kept entry takes the password you pick and
 gains the other copies' details as above. The other copies, with their passwords, go to the Trash, so sign in
@@ -231,7 +239,7 @@ and the phone's doing; this has not been checked on a real iPhone.
 | `bw-health.sh` | Entry point and installer (runs under the Mac's bash 3.2): installs uv and the pinned Bitwarden CLI, signs in once, runs the report, stages exports, or starts a dedupe step. |
 | `bw_report.py` | The health report and the summary: every check in the table above, the links and the progress line, as one self-contained HTML page. Read-only. |
 | `public_suffix_list.dat` | A pinned copy of the [Public Suffix List](https://publicsuffix.org/list/), so `co.uk` and `github.io` are read as shared endings when sites are grouped. Never fetched at run time from its source: update it by hand, with a new checksum and `VERSION`. |
-| `fix_order.txt` | Which sites and Bitwarden folders are fixed first. One `tier domain` or `tier folder: name` per line; edit it to add a site. |
+| `fix_order.txt` | The one place the kinds of site are decided. One `tier domain`, `tier .ending` (such as `1 .gov`) or `tier folder: name` per line; a folder line wins, then a domain, then an ending. Edit it to add a site. |
 | `bw_import_diff.py` | Compares Chrome and Apple exports with the vault and writes the import csv and `conflicts.md`. Read-only. |
 | `bw_dedupe.py` | Duplicate cleanup and the AutoFill fix: the only code that edits or trashes vault items. It also holds the site grouping the report uses. |
 | `tests/run.sh` | End-to-end tests with a stand-in `bw`; fixtures are in `tests/fixture`. |

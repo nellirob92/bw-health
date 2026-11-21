@@ -64,10 +64,10 @@ FILES="bw_report.py bw_import_diff.py bw_dedupe.py fix_order.txt public_suffix_l
 # SHA-256 of each fetched file. `bash tests/run.sh` fails, and prints the right value, when one is stale.
 pinned_sha256() { # <file name>
   case "$1" in
-    bw_report.py)      echo "065b2550a7f2370b92a179e5a83238bdf4de07c4a6cc5e2298448faa5dee57fe" ;;
+    bw_report.py)      echo "e27f8bb4ba8b055edadda832c162655a297cc8050f69dbaf4b030f74b08e288a" ;;
     bw_import_diff.py) echo "5c01fa14640d0de6e844cde52944cbef8d116ed91fb2ce3f064430ff17bdf37c" ;;
-    bw_dedupe.py)      echo "b4f5da3a157e3c21f45fb40d5c00eb53f0a952b4fd8e4726c5706dcea6168c6a" ;;
-    fix_order.txt)     echo "2b5f17f989ff070ada47bcf0b1ccb71e888b94143ae2cdd1a7b68d8d821525a5" ;;
+    bw_dedupe.py)      echo "3814b2bf812894de6a5b8957b6ffdf076798eb1f506451cf050ad8bece1dc0f3" ;;
+    fix_order.txt)     echo "41a48bd1b954f15c5ad4b8503cabd974b9e036f8ab08d6ad685911b8fdd6f55b" ;;
     public_suffix_list.dat) echo "3084c6ca4ac1dfb6e32461504b5dc494cc58ace521957e9e978ed0f870b2de94" ;;
     *) fail "no checksum is written in bw-health.sh for $1" ;;
   esac
