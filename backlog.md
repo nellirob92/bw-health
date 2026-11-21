@@ -25,7 +25,21 @@ Work that was considered and left out, with the reason.
   above one, or shares a domain named in `fix_order.txt`. A site whose sign-in address is none of those
   (a sibling of the listed address, with no domain in `fix_order.txt`) is not flagged.
 - **A check that the links in the report open the right pages** (the web vault's item, account and
-  two-step pages, and each site's change-password address). They are built, never fetched.
+  two-step pages, and each site's change-password address). They are built, never fetched, and have not
+  been tried on a real vault.
+- **The import diff still matches by host.** The report and the dedupe step group by site (registrable
+  domain, from the pinned public suffix list); `bw_import_diff.py` still compares an export row with the
+  vault by host and username, so `secure01.bank.com` in Chrome and `www.bank.com` in the vault are listed
+  as new. Moving it to the same site key changes what gets imported, so it needs its own release.
+- **Done ticks after a browser restart.** The ticks live in the browser's storage for the report's
+  `file://` page. Chrome keeps them; whether Safari keeps them after quitting, and whether each dated report
+  shares them, has not been tried.
+- **Whether iPhone AutoFill then offers a login** that the AutoFill fix gave an `https://` address. The
+  fix is read back from Bitwarden; what the phone does with it has not been checked.
+- **Refreshing the public suffix list.** `public_suffix_list.dat` is a pinned copy and goes stale slowly
+  (new shared endings). It is updated by hand, with a new checksum and `VERSION`; nothing reminds anyone.
+- **The shareable summary is replaced on every run**, never kept per date. A family member who wants the
+  last one keeps their own copy.
 
 ## Audit findings, release 1.0.0
 
@@ -33,14 +47,6 @@ The release audit looked for blockers only (a password printed, logged or writte
 the dedupe step; a way round the checksums or the tag; one profile reaching another's data; a break of
 the old `main` paste line) and found none. What it found besides, most serious first:
 
-- **One shared copy of the fetched scripts.** Every run, of any version and any profile, copies its four
-  files into the same folder (`~/Library/Application Support/bw-health`) before using them. Two checkouts
-  or versions run close together can overwrite each other's scripts between the copy and the use.
-  Proposal: copy into a folder of the run's own, named for the version and the files' checksums (or a
-  temporary folder per run), and run the scripts from there.
-- **A fixed temporary name while fetching.** Each file is written to `<name>.new` in that shared folder
-  before its checksum is checked. Two runs at the same moment can install a file the other is still
-  writing. Proposal: a unique temporary name per run (`mktemp`).
 - **Progress is matched by item id, not by account.** If a profile, or the shared sign-in, is signed out
   and someone else signs in, the next report says everything was fixed and everything is new. Proposal:
   keep Bitwarden's account id in the progress file and start again when it differs.
@@ -53,8 +59,6 @@ the old `main` paste line) and found none. What it found besides, most serious f
   From 1.0.0 on, the script fetches from its own tag, so later releases do not have this gap.
 - **Two installs that are still unpinned**, both from before this release: `uv` comes from its own
   installer script, and `uv run` takes the newest `zxcvbn` that satisfies `>=4.4`.
-- **Addresses that are not web addresses.** An `androidapp://` address is treated as a site, so its
-  "Site" and "Change password" links lead nowhere.
 - **Notes on cards and identities are not checked** for passwords; only secure notes and logins are.
 - **`logout` with a name that was never used lists the profile names on this Mac account.**
 - **The report-pruning pattern for the shared folder would also match a profile's reports** if they

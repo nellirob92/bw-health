@@ -2,26 +2,34 @@
 # /// script
 # requires-python = ">=3.11"
 # ///
-"""Trash or merge duplicate logins in a Bitwarden vault, one stage at a time.
+"""Trash or merge duplicate logins in a Bitwarden vault, or add https:// addresses, one stage at a time.
 
 A duplicate group is the same site and username (case-insensitive), the grouping the health
-report uses. Three stages, each run on its own:
+report uses. A site is a web address's registrable domain, taken from the public suffix list
+beside this script, so secure05.bank.com and www.bank.com are bank.com while a.github.io and
+b.github.io stay two sites. An IP address, localhost, a name without a dot and an app address
+are each a site of their own. Four stages, each run on its own:
 
-  exact  groups whose copies are identical in every field: keep one, trash the rest.
-  merge  groups with the same password (or a missing one) but other details that differ: add the
-         extra URLs, notes, custom fields and one-time-code seed to the kept
-         copy, fill a missing password from another copy, then trash the rest.
-  pick   groups whose only conflict is different passwords: the person picks, group by group, the
-         password that works (copies listed newest password first, Enter skips), then it is merged
-         like the merge stage and the other copies, with their passwords, go to the trash.
+  exact    groups whose copies are identical in every field: keep one, trash the rest.
+  merge    every group that is safe to merge: the identical ones, and those with the same password
+           (or a missing one) but other details that differ. The kept copy gains the extra URLs,
+           notes, custom fields and one-time-code seed, and a missing password, then the rest go
+           to the trash.
+  pick     groups whose only conflict is different passwords: the person picks, group by group, the
+           password that works (copies listed newest password first, Enter skips), then it is merged
+           like the merge stage and the other copies, with their passwords, go to the trash.
+  fixurls  logins saved with only http:// addresses: each gains the https:// twin of every address,
+           with the same match setting. Nothing else changes and nothing is trashed.
 
-A copy that holds a passkey is always the kept copy, since a passkey cannot be moved. After every
-edit the kept copy is read back, and the run stops before trashing anything if bw saved something
-other than what was sent. A group is left alone, and listed with the reason, when copies have
-different one-time-code seeds, a custom field with two values, an attachment, several passkeys or
-one listed without its key, password history the kept copy lacks (bw edit cannot save a joined
-history), or belong to an organization. Without --apply this only writes a plan. Trashed copies
-stay in the web vault's Trash for 30 days; this script never deletes permanently.
+A copy that holds a passkey is always the kept copy, since a passkey cannot be moved; otherwise the
+newest copy is kept. After every edit the item is read back, and the run stops before trashing
+anything if bw saved something other than what was sent. A group is left alone, and listed with the
+reason, when copies have different one-time-code seeds, a custom field with two values, an
+attachment, several passkeys or one listed without its key, password history the kept copy lacks
+(bw edit cannot save a joined history), or belong to an organization. fixurls leaves alone a login
+that holds a passkey (an edit rewrites the whole login), one shared with an organization, and one
+whose addresses are devices at home. Without --apply this only writes a plan. Trashed copies stay
+in the web vault's Trash for 30 days; this script never deletes permanently.
 """
 
 from __future__ import annotations
@@ -30,6 +38,7 @@ import argparse
 import base64
 import copy
 import hashlib
+import ipaddress
 import json
 import os
 import subprocess
@@ -43,6 +52,10 @@ from urllib.parse import urlparse
 
 LOGIN_TYPE = 1
 CONFIRM_WORD = "DEDUPE"
+FIXURLS_WORD = "FIXURLS"
+SUFFIX_LIST = Path(__file__).with_name("public_suffix_list.dat")
+SUFFIX_LIST_MIN_RULES = 5000  # the real list has about 10,000; far fewer means a cut-off or wrong file
+WEB_SCHEMES = ("http", "https")
 NOTE_SEPARATOR = "\n\n--- merged from a duplicate entry ---\n\n"
 DIFFERENT_PASSWORDS = "different passwords"
 
@@ -73,18 +86,104 @@ def load_folders() -> dict[str, str]:
     return {f["id"]: f.get("name") or "" for f in json.loads(run_bw("list", "folders")) if f.get("id")}
 
 
-def host_of(item: dict) -> str:
-    for u in (item.get("login") or {}).get("uris") or []:
-        uri = (u or {}).get("uri") or ""
-        if not uri:
+def ascii_host(name: str) -> str:
+    """A host name in the list's comparison form: lower case, each non-ASCII label as punycode."""
+    return ".".join(label if label.isascii() else "xn--" + label.encode("punycode").decode("ascii")
+                    for label in name.strip(".").lower().split("."))
+
+
+@dataclass(frozen=True)
+class SuffixList:
+    """The public suffix list (publicsuffix.org): which endings are shared, like com, co.uk or github.io."""
+    rules: frozenset[str]
+    wildcards: frozenset[str]   # "*.ck" is kept as "ck"
+    exceptions: frozenset[str]  # "!www.ck" is kept as "www.ck"
+
+    def registrable(self, host: str) -> str:
+        """The shared ending plus one label: secure05.bank.com is bank.com, login.shop.co.uk is shop.co.uk,
+        a.github.io stays a.github.io. A host that is itself a shared ending stands for itself."""
+        labels = host.split(".")
+        for i in range(len(labels)):  # longest candidate first, so the longest rule wins
+            candidate = ".".join(labels[i:])
+            if candidate in self.exceptions:
+                size = len(labels) - i - 1
+            elif candidate in self.rules or (i + 1 < len(labels) and ".".join(labels[i + 1:]) in self.wildcards):
+                size = len(labels) - i
+            else:
+                continue
+            return host if size >= len(labels) else ".".join(labels[-(size + 1):])
+        return ".".join(labels[-2:])  # the list's default rule: an unlisted ending is one label
+
+
+@cache
+def suffix_list() -> SuffixList:
+    try:
+        text = SUFFIX_LIST.read_text(encoding="utf-8")
+    except OSError as err:
+        sys.exit(f"The public suffix list could not be read ({err}). It must sit beside {Path(__file__).name}.")
+    rules, wildcards, exceptions = set(), set(), set()
+    for line in text.splitlines():
+        rule = line.strip().split(" ")[0]
+        if not rule or rule.startswith("//"):
             continue
-        try:
-            parsed = urlparse(uri if "://" in uri else f"https://{uri}")
-        except ValueError:  # real vaults hold malformed URLs (an unclosed IPv6 bracket); one must not stop the run
-            return uri.strip().lower()
-        host = parsed.hostname or uri
-        return host[4:] if host.startswith("www.") else host
-    return ""
+        if rule.startswith("!"):
+            exceptions.add(ascii_host(rule[1:]))
+        elif rule.startswith("*."):
+            wildcards.add(ascii_host(rule[2:]))
+        else:
+            rules.add(ascii_host(rule))
+    if len(rules) < SUFFIX_LIST_MIN_RULES:
+        sys.exit(f"{SUFFIX_LIST} holds only {len(rules)} rules, so it is not the whole public suffix list. Nothing was changed.")
+    return SuffixList(frozenset(rules), frozenset(wildcards), frozenset(exceptions))
+
+
+def is_ip(host: str) -> bool:
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return True
+
+
+def parse_uri(uri: str) -> tuple[str, str, int | None] | None:
+    """(scheme, host, port) of a saved address, a bare one read as https; None when it has no host or is malformed."""
+    raw = uri.strip()
+    try:
+        parsed = urlparse(raw if "://" in raw else f"https://{raw}")
+        host, port = (parsed.hostname or "").lower(), parsed.port
+    except ValueError:  # real vaults hold malformed URLs (an unclosed IPv6 bracket); one must not stop the run
+        return None
+    return (parsed.scheme.lower(), host, port) if host else None
+
+
+HOME_NETWORK_ENDINGS = (".local", ".lan", ".home", ".home.arpa", ".internal")
+
+
+def is_device(host: str) -> bool:
+    """An address that is a device, not a website: an IP address, localhost, a name without a dot, or a home-network name."""
+    return is_ip(host) or host == "localhost" or "." not in host or host.endswith(HOME_NETWORK_ENDINGS)
+
+
+def site_of(uri: str) -> str:
+    """The site a saved address belongs to. A web address is its registrable domain, without www. or a page;
+    a device keeps its host and port, never split into labels; an app or malformed address is itself."""
+    parts = parse_uri(uri)
+    if parts is None or parts[0] not in WEB_SCHEMES:
+        return uri.strip().lower().rstrip("/")
+    _, host, port = parts
+    if is_device(host):
+        return host + (f":{port}" if port else "")
+    return suffix_list().registrable(ascii_host(host))
+
+
+def first_site_uri(uris: list[str]) -> str | None:
+    """The address that names a login's site: its first web address, or its first address when it has none."""
+    web = [u for u in uris if (p := parse_uri(u)) and p[0] in WEB_SCHEMES]
+    return (web or uris or [None])[0]
+
+
+def uri_strings(item: dict) -> list[str]:
+    return [uri for u in login_of(item).get("uris") or [] if (uri := ((u or {}).get("uri") or "").strip())]
 
 
 def login_of(item: dict) -> dict:
@@ -92,9 +191,10 @@ def login_of(item: dict) -> dict:
 
 
 def account_key(item: dict) -> str | None:
+    """Same site + username (case-insensitive) is one account; a login missing either stands alone (None)."""
     username = login_of(item).get("username") or ""
-    host = host_of(item)
-    return f"{host}|{username.lower()}" if host and username else None
+    first = first_site_uri(uri_strings(item))
+    return f"{site_of(first)}|{username.lower()}" if first and username else None
 
 
 def uri_key(u: dict, loose: bool = False) -> str:
@@ -190,10 +290,11 @@ def blocker(items: list[dict]) -> str | None:
 
 
 def pick_keeper(items: list[dict]) -> dict:
-    holders = [i for i in items if passkeys(i)]  # a passkey cannot be moved to another item, so its holder is kept
+    """The copy that holds a passkey (it cannot be moved to another item), otherwise the newest copy."""
+    holders = [i for i in items if passkeys(i)]
     if holders:
         return holders[0]
-    return max(items, key=lambda i: (bool(login_of(i).get("totp")), i.get("revisionDate") or "", i["id"]))
+    return max(items, key=lambda i: (i.get("revisionDate") or "", i["id"]))
 
 
 def merge_into(keeper: dict, others: list[dict]) -> dict:
@@ -265,13 +366,52 @@ def find_groups(items: list[dict]) -> list[Group]:
     return groups
 
 
+def http_only(uris: list[str]) -> bool:
+    """Every saved address starts with http://: the case the report flags for AutoFill."""
+    return bool(uris) and all(u.lower().startswith("http://") for u in uris)
+
+
+def on_devices(uris: list[str]) -> bool:
+    """Every address is a device at home (a router, a printer), which has no https:// page to add."""
+    return all((p := parse_uri(u)) is not None and is_device(p[1]) for u in uris)
+
+
+def https_twin(u: dict) -> dict:
+    """The same address and match setting over https://. Only ever called on an http:// address."""
+    uri = (u.get("uri") or "").strip()
+    return {**u, "uri": "https://" + uri[len("http://"):]}
+
+
+def find_fixes(items: list[dict]) -> tuple[list[Group], list[Group]]:
+    """(logins to fix, logins left alone with the reason). A fix is a Group with no other copies."""
+    fixes, left = [], []
+    for i in items:
+        if i.get("type") != LOGIN_TYPE or i.get("deletedDate") or not http_only(uri_strings(i)) or on_devices(uri_strings(i)):
+            continue
+        username = login_of(i).get("username") or ""
+        g = Group(f"{site_of(uri_strings(i)[0])}|{username.lower()}", i, [])
+        if i.get("organizationId"):
+            g.blocked = "shared with an organization"
+        elif passkeys(i):
+            g.blocked = "holds a passkey: add its https:// address by hand in Bitwarden"
+        elif any(parse_uri(u) is None for u in uri_strings(i)):
+            g.blocked = "an address that cannot be read: correct it by hand in Bitwarden"
+        else:  # a device's address (a router beside the website) gets no https:// twin
+            merged = copy.deepcopy(i)
+            uris = login_of(merged)["uris"]
+            uris += [https_twin(u) for u in list(uris) if (p := parse_uri((u or {}).get("uri") or "")) and not is_device(p[1])]
+            g.merged = merged
+        (left if g.blocked else fixes).append(g)
+    return fixes, left
+
+
 def select(groups: list[Group], stage: str) -> tuple[list[Group], list[Group], int]:
     """(groups this stage acts on, groups left alone, groups waiting for another stage)."""
     if stage == "pick":
         acting = [g for g in groups if g.blocked == DIFFERENT_PASSWORDS]
         blocked = [g for g in groups if g.blocked and g.blocked != DIFFERENT_PASSWORDS]
-    else:
-        acting = [g for g in groups if not g.blocked and g.exact == (stage == "exact")]
+    else:  # merge takes every group that is safe to merge, the identical ones included
+        acting = [g for g in groups if not g.blocked and (stage == "merge" or g.exact)]
         blocked = [g for g in groups if g.blocked]
     other_stage = len(groups) - len(acting) - len(blocked)
     return acting, blocked, other_stage
@@ -307,15 +447,18 @@ def set_password(g: Group, password: str) -> None:
 STAGE_SUMMARY = {
     "exact": ("Exact stage: a login saved more than once (same site and username) where the copies are identical in every field. "
               "One copy is kept and the rest go to the Bitwarden trash."),
-    "merge": ("Merge stage: a login saved more than once (same site and username) with the same password, or a missing one, "
-              "but other details that differ. The kept copy gains the other copies' URLs, "
+    "merge": ("Merge stage: a login saved more than once (same site and username) with the same password, or a missing one. "
+              "The kept copy gains the other copies' URLs, "
               "notes, custom fields, one-time-code seed, a missing password and any favorite or re-prompt setting, then the rest go to the "
-              "Bitwarden trash. A copy with a passkey is always the one kept. Only the kept copy's name and folder survive."),
+              "Bitwarden trash. A copy with a passkey is always the one kept, otherwise the newest. Only the kept copy's name and folder survive."),
     "pick": ("Pick stage: a login saved more than once (same site and username) whose copies have different passwords and "
              "no other conflict. Each copy is listed newest password first, with its dates. Type the number of the password "
              "that works, or press Enter to skip the group. The kept entry takes that password and gains the other copies' "
              "details as in the merge stage. The other copies, with their passwords, go to the Bitwarden trash for 30 days. "
              "A copy with a passkey is always the one kept."),
+    "fixurls": ("AutoFill fix: a login saved with only http:// addresses gains the https:// twin of each one, with the same match "
+                "setting, so AutoFill can offer it on the secure page. Nothing else in the entry changes and nothing goes to the trash. "
+                "A login that holds a passkey is left alone, because the edit rewrites the whole login: add its https:// address by hand."),
 }
 
 
@@ -392,7 +535,7 @@ def render_preview(groups: list[Group], total: int, folders: dict[str, str]) -> 
         lines.append(f"  ADDS   {', '.join(gains(g)) or 'nothing'}")
         if differences(g):
             lines.append(f"  NOTE   {', '.join(differences(g))}")
-        if passkeys(g.keeper):
+        if passkeys(g.keeper) and g.merged is not None:  # with no edit the passkey copy is never written
             lines.append("  NOTE   the kept copy holds a passkey. The edit is read back and the run stops before trashing if it differs, "
                          "but the passkey itself could already be changed: keep the original in Apple Passwords or Chrome until you have checked this entry in Bitwarden")
         lines.append("")
@@ -456,6 +599,38 @@ def render_plan(stage: str, acting: list[Group], blocked: list[Group], other_sta
     return "\n".join(lines)
 
 
+def added_urls(g: Group) -> list[str]:
+    """The https:// addresses a fixurls edit adds, for display."""
+    have = {(u or {}).get("uri") for u in login_of(g.keeper).get("uris") or []}
+    return [shown_url(u) for u in login_of(g.merged or g.keeper).get("uris") or [] if u.get("uri") not in have]
+
+
+def render_fixes(fixes: list[Group], total: int, folders: dict[str, str]) -> str:
+    lines = []
+    for n, g in enumerate(fixes, start=1):
+        lines += [f"[{n}/{total}] {g.label}", f"  ENTRY  {item_summary(g.keeper, folders)}",
+                  f"  ADDS   {', '.join(added_urls(g))}", ""]
+    return "\n".join(lines)
+
+
+def render_fix_plan(fixes: list[Group], left: list[Group], folders: dict[str, str]) -> str:
+    lines = ["# AutoFill fix plan", "", STAGE_SUMMARY["fixurls"], "",
+             f"- Logins this step will change: **{len(fixes)}**", f"- Logins left alone: **{len(left)}**", "", "## Will change", ""]
+    if fixes:
+        lines += ["| Login | Entry | Adds |", "| --- | --- | --- |"]
+        lines += [f"| {g.label} | {clean(g.keeper.get('name') or '(no name)')} ({folder_name(g.keeper, folders)}) "
+                  f"| {', '.join(added_urls(g))} |" for g in fixes]
+    else:
+        lines.append("Nothing.")
+    lines += ["", "## Left alone, and why", ""]
+    if left:
+        lines += ["| Login | Reason |", "| --- | --- |"] + [f"| {g.label} | {g.blocked} |" for g in left]
+    else:
+        lines.append("Nothing.")
+    lines += ["", "_No password is written in this file._"]
+    return "\n".join(lines)
+
+
 @cache
 def terminal():
     """Opened once, so successive answers are successive lines (stdin is not the keyboard under curl | bash)."""
@@ -467,12 +642,16 @@ def ask(prompt: str) -> str:
     return terminal().readline().strip()
 
 
-def verify_edit(g: Group) -> None:
+def verify_edit(g: Group, exact_uris: bool = False) -> None:
     """Read the kept copy back after the edit. Stops the run, before anything is trashed, if bw saved something other
-    than what was sent: a passkey cannot be recreated, and the real edit path has been seen to rebuild the login."""
+    than what was sent: a passkey cannot be recreated, and the real edit path has been seen to rebuild the login.
+    exact_uris: every address sent must come back as written (the https:// twin is the whole point of fixurls)."""
     got = json.loads(run_bw("get", "item", g.keeper["id"]))
     want = g.merged or g.keeper
     wrong = []
+    if exact_uris and ({(u.get("uri"), u.get("match")) for u in login_of(want).get("uris") or []}
+                       - {(u.get("uri"), u.get("match")) for u in login_of(got).get("uris") or []}):
+        wrong.append("web addresses")
     if login_of(got).get("password") != login_of(want).get("password"):
         wrong.append("password")
     if passkey_ids(got) != passkey_ids(want):
@@ -499,7 +678,7 @@ def verify_edit(g: Group) -> None:
                  "and tell the person who sent you this line what this window printed.")
 
 
-def apply(groups: list[Group]) -> None:
+def apply(groups: list[Group], fixurls: bool = False) -> None:
     for g in groups:  # checked up front so a refusal changes nothing
         if any(str(i["id"]).startswith("-") for i in [g.keeper, *g.others]):
             sys.exit(f"Refusing {g.label}: an item id starts with '-', which bw could read as an option. Nothing was changed.")
@@ -507,16 +686,48 @@ def apply(groups: list[Group]) -> None:
         if g.merged is not None:
             encoded = base64.b64encode(json.dumps(g.merged).encode("utf-8")).decode("ascii")
             run_bw("edit", "item", g.keeper["id"], stdin=encoded)
-            verify_edit(g)
+            verify_edit(g, exact_uris=fixurls)
         for other in g.others:
             run_bw("delete", "item", other["id"])
-        print(f"[{n}/{len(groups)}] {g.label}: kept one, trashed {len(g.others)}", flush=True)
+        done = "added the https:// address" if fixurls else f"kept one, trashed {len(g.others)}"
+        print(f"[{n}/{len(groups)}] {g.label}: {done}", flush=True)
+
+
+def run_fixurls(args: argparse.Namespace, items: list[dict], folders: dict[str, str], out_dir: Path) -> None:
+    fixes, left = find_fixes(items)
+    plan = out_dir / "plan-fixurls.md"
+    plan.write_text(render_fix_plan(fixes, left, folders), encoding="utf-8")
+    plan.chmod(0o600)
+    print(f"{len(fixes)} login(s) to change, {len(left)} left alone. Plan: {plan}")
+    print(f"\n{STAGE_SUMMARY['fixurls']}")
+    if left:
+        print("Left alone: " + ", ".join(f"{n} {why}" for why, n in Counter(g.blocked for g in left).most_common()) + ".")
+    if not args.apply:
+        if fixes[:3]:
+            head = "all" if len(fixes) <= 3 else f"the first 3 of {len(fixes)}"
+            print(f"\nPreview: {head} logins (every login is in the plan file)\n")
+            print(render_fixes(fixes[:3], len(fixes), folders))
+        print("Nothing was changed. Add apply to act on this plan.")
+        return
+    todo = fixes[: args.limit] if args.limit else fixes
+    if not todo:
+        print("Nothing to do.")
+        return
+    print(f"\nActing on {len(todo)} of {len(fixes)} logins:\n")
+    print(render_fixes(todo, len(todo), folders))
+    answer = ask(f"This will add an https:// address to {len(todo)} {'login' if len(todo) == 1 else 'logins'} and change nothing else. "
+                 f"Type {FIXURLS_WORD} to continue: ")
+    if answer != FIXURLS_WORD:
+        sys.exit("Not confirmed. Nothing was changed.")
+    apply(todo, fixurls=True)
+    print("Done. Run the check-up again to see what is left.")
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("stage", choices=["exact", "merge", "pick"],
-                    help="exact: identical copies only; merge: same password, details differ; pick: choose between different passwords")
+    ap.add_argument("stage", choices=["exact", "merge", "pick", "fixurls"],
+                    help="exact: identical copies only; merge: every group safe to merge; pick: choose between different passwords; "
+                         "fixurls: add https:// to logins saved with http:// only")
     ap.add_argument("--out-dir", required=True, help="folder for the plan file")
     ap.add_argument("--apply", action="store_true", help="act on the plan after you type the confirmation word")
     ap.add_argument("--limit", type=int, help="act on only the first N groups (a first run should use 1)")
@@ -524,14 +735,19 @@ def main() -> None:
     if args.limit is not None and args.limit < 1:
         sys.exit("--limit must be 1 or more")
 
+    word = FIXURLS_WORD if args.stage == "fixurls" else CONFIRM_WORD
     if args.apply:
-        print("Nothing in your vault changes until you have read the list below and typed DEDUPE.\n", flush=True)
+        print(f"Nothing in your vault changes until you have read the list below and typed {word}.\n", flush=True)
     else:
         print("PREVIEW ONLY: this step does not change, merge or delete anything in your vault.\n", flush=True)
-    acting, blocked, other_stage = select(find_groups(load_items()), args.stage)
+    items = load_items()
     folders = load_folders()
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    if args.stage == "fixurls":
+        run_fixurls(args, items, folders, out_dir)
+        return
+    acting, blocked, other_stage = select(find_groups(items), args.stage)
     plan = out_dir / f"plan-{args.stage}.md"
     plan.write_text(render_plan(args.stage, acting, blocked, other_stage, folders), encoding="utf-8")
     plan.chmod(0o600)
