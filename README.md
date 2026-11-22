@@ -120,9 +120,12 @@ curl -fsSL https://raw.githubusercontent.com/nellirob92/bw-health/v1.1.0/bw-heal
 ## Share a summary
 
 Each check-up also writes **Bitwarden Summary.html** (or **Bitwarden Summary - mom.html** with `--user mom`)
-next to the reports, and says where. It holds counts only: how many sites need work, by problem and by kind
-of site, and what an attacker or an AI tool could do with each kind of problem. It has no site, username,
-web address, Bitwarden id, link or password, so it can be sent to family. Each run replaces it.
+next to the reports, and says where. It holds counts only: how many sites need work, three plain steps in
+fix-first order (email and main accounts, then money, then the rest, with two-step login turned on where it
+is offered), the counts by problem and by kind of site (a count of 0 is left out), and what an attacker or an
+AI tool could do with each kind of problem. It has no site, username, web address, Bitwarden id, link or
+password, so it can be sent to family. Each run replaces it, and only once the report itself is written. The
+summary and the report show the same check-up time, so a pair from one run can be told from two.
 
 To write and open only the summary, with no report and no import step:
 

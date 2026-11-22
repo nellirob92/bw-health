@@ -766,9 +766,11 @@ def ring(work: int, total: int) -> str:
             f'<rect y="4" width="22" height="2" class="sw-fine"/></svg>{total - work} with nothing to do</span></figcaption></figure>')
 
 
-def bars(title: str, rows: list[tuple[str, str, int | None]]) -> str:
+def bars(title: str, rows: list[tuple[str, str, int | None]], hide_zero: bool = False) -> str:
     """Horizontal bars, each with its word and its number: the color only repeats what the word says.
-    rows: (word, kind, count), the kind naming the color and, for a problem, its shape; None: not checked this run."""
+    rows: (word, kind, count), the kind naming the color and, for a problem, its shape; None: not checked this run.
+    hide_zero leaves out a row whose count is 0 (a check that did not run is still shown)."""
+    rows = [r for r in rows if not (hide_zero and r[2] == 0)]
     top = max((n for _, _, n in rows if n is not None), default=0) or 1
     out = "".join(f'<div class="bar"><span class="bl">{svg(kind) if kind in SHAPES else ""}{esc(word)}</span>'
                   f'<span class="track"><span class="fill f-{kind}" style="width:{100 * (n or 0) / top:.1f}%"></span></span>'
@@ -776,7 +778,7 @@ def bars(title: str, rows: list[tuple[str, str, int | None]]) -> str:
     return f'<div class="bars"><h3>{title}</h3>{out}</div>'
 
 
-def dashboard(m: Model, for_summary: bool) -> str:
+def dashboard(m: Model, for_summary: bool, after_headline: str = "") -> str:
     rep = m.rep
     total, need, work = len(m.sites), len(m.need_password), len(m.to_fix)
     smaller, fine = work - need, total - work
@@ -802,9 +804,9 @@ def dashboard(m: Model, for_summary: bool) -> str:
     not_run |= {TWOFA} if rep.twofa_skipped else set()
     problem_rows = [(CHIP_WORDS[p], p, None if p in not_run else len(m.with_problem(p))) for p in SEVERITY]
     tier_rows = [(f"{t} · {name}", "tier", sum(1 for s in m.to_fix if s.tier == t)) for t, name in TIER_NAMES.items()]
-    return (f'<section class="dash">{ring(work, total)}<div class="lead">{headline}{notes}</div></section>'
-            f'<div class="scores">{cards}</div><div class="charts">{bars("Sites per problem", problem_rows)}'
-            f'{bars("Sites to fix, by kind of site", tier_rows)}</div>')
+    return (f'<section class="dash">{ring(work, total)}<div class="lead">{headline}{notes}</div></section>{after_headline}'
+            f'<div class="scores">{cards}</div><div class="charts">{bars("Sites per problem", problem_rows, for_summary)}'
+            f'{bars("Sites to fix, by kind of site", tier_rows, for_summary)}</div>')
 
 
 # --- the report ------------------------------------------------------------------------------------------
@@ -821,7 +823,7 @@ def strength_bar(score: int) -> str:
     return f'<span class="strength" aria-hidden="true">{segs}</span> {score} of 4'
 
 
-def render(rep: Report, progress: Progress, vault_url: str, today: str, paste_line: str, user: str) -> str:
+def render(rep: Report, progress: Progress, vault_url: str, stamp: str, paste_line: str, user: str) -> str:
     vault = vault_url if SAFE_VAULT_URL.fullmatch(vault_url) else ""
     m = model_of(rep)
 
@@ -851,7 +853,7 @@ def render(rep: Report, progress: Progress, vault_url: str, today: str, paste_li
     totals = (f'<p class="totals muted">Logins with a password: {rep.total - rep.trashed} · In trash (ignored, empty it): '
               f'{rep.trashed} · Logins with no password: {rep.no_password} · Distinct passwords reused: {len(rep.reused)} · {entries}</p>')
 
-    parts = [f'<header><h1>Bitwarden check-up</h1><p class="date">Check-up of {esc(today)}.</p>'
+    parts = [f'<header><h1>Bitwarden check-up</h1><p class="date">Check-up of {esc(stamp)}.</p>'
              f'<p class="progress">{progress_line}</p></header>', dashboard(m, for_summary=False), totals]
     first = m.to_fix[:FIX_FIRST]
     if first:
@@ -1061,7 +1063,25 @@ HOW_USED = {
 }
 
 
-def render_summary(rep: Report, today: str, user: str) -> str:
+def plan_steps(m: Model) -> str:
+    """Three steps in the order the report fixes things, each with how many sites it covers: generic words, no site."""
+    steps = [
+        ("Email and main accounts first", "email; Apple, Google and Microsoft accounts; government and ID sites", {1},
+         "Give each its own new password from Bitwarden's generator, and turn on two-step login wherever the site offers it."),
+        ("Then money", "banks, cards, payment and shopping sites", {2},
+         "The same way: a new password each, and two-step login where it is offered."),
+        ("Then the rest", "", set(TIER_NAMES) - {1, 2},
+         "Most serious first: an exposed password, then a reused or weak one; then the tidy-ups (duplicate entries, AutoFill addresses)."),
+    ]
+    out = []
+    for name, covers, tiers, how in steps:
+        n = sum(1 for s in m.to_fix if s.tier in tiers)
+        what = f"{plural(n, 'site needs', 'sites need')} work. {how}" if n else "nothing needs work here."
+        out.append(f"<li><strong>{name}</strong>{f' ({covers})' if covers else ''}: {what}</li>")
+    return '<section class="card"><h2>What we\'ll do</h2><ol class="steps">' + "".join(out) + "</ol></section>"
+
+
+def render_summary(rep: Report, stamp: str, user: str) -> str:
     """Counts by kind of site only: no site, username, host, item id or link."""
     m = model_of(rep)
     risks = []
@@ -1072,8 +1092,8 @@ def render_summary(rep: Report, today: str, user: str) -> str:
             risks.append(f"<li><strong>{esc(name)}:</strong> {plural(len(here), 'site needs', 'sites need')} work ({what}).</li>")
     how = "".join(f"<li>{chip(p)} {HOW_USED[p]}</li>" for p in SEVERITY if p in HOW_USED and m.with_problem(p))
     whose = f" for {esc(user)}" if user else ""
-    body = (f'<header><h1>Bitwarden summary{whose}</h1><p class="date">Check-up of {esc(today)}. Counts only: no site, username '
-            f'or password is on this page.</p></header>{dashboard(m, for_summary=True)}'
+    body = (f'<header><h1>Bitwarden summary{whose}</h1><p class="date">Check-up of {esc(stamp)}. Counts only: no site, username '
+            f'or password is on this page.</p></header>{dashboard(m, for_summary=True, after_headline=plan_steps(m))}'
             f'<section class="card"><h2>Top risks, by kind of site</h2>'
             f'{"<ul>" + "".join(risks) + "</ul>" if risks else "<p>Nothing found.</p>"}</section>'
             f'<section class="card"><h2>How an attacker or AI tool would use this</h2>'
@@ -1149,7 +1169,7 @@ ol.first{margin:.3rem 0;padding-left:1.4rem}ol.first li{margin:.25rem 0}
 .seg.on{background:var(--amber)}
 .tools{display:flex;gap:16px;flex-wrap:wrap;align-items:center;margin:12px 0}[hidden]{display:none!important}.tools input[type=search]{font:inherit;padding:4px 8px}
 code{font-size:.85rem;background:var(--track);padding:1px 4px;border-radius:4px;word-break:break-all}
-ul.how{padding-left:0;list-style:none}ul.how li{margin:.5rem 0}
+ul.how{padding-left:0;list-style:none}ul.how li{margin:.5rem 0}ol.steps{padding-left:1.4rem;margin:.2rem 0}ol.steps li{margin:.4rem 0}
 footer{margin-top:24px;font-size:.85rem}
 @media print{body{background:#fff;color:#000;-webkit-print-color-adjust:exact;print-color-adjust:exact}.tools,.done-col{display:none!important}.card,.score,.bars{break-inside:avoid}
 a.v .i{display:none}main{padding:0}}
@@ -1258,18 +1278,21 @@ def main() -> None:
         twofa, skipped = load_twofa(args.twofa_file, args.twofa_cache)
     now = datetime.now(timezone.utc)
     today = f"{now.astimezone():%Y-%m-%d}"
+    stamp = f"{now.astimezone():%Y-%m-%d %H:%M}"  # on both pages, so a summary and a report from two runs are told apart
     rep = build(items, order, folders, not args.no_hibp, twofa, skipped, now)
-    if args.summary:
-        write_page(args.summary, render_summary(rep, today, args.user))
+    summary = render_summary(rep, stamp, args.user) if args.summary else ""
     if args.summary_only:
+        write_page(args.summary, summary)
         return
     state = Path(args.state) if args.state else None
     progress = compare(read_state(state) if state else None, rep)
-    report = render(rep, progress, vault_url, today, args.paste_line, args.user)
+    report = render(rep, progress, vault_url, stamp, args.paste_line, args.user)
     if args.out:
         write_page(args.out, report)
     else:
         print(report)
+    if args.summary:  # written after the report, so a failed report never leaves a summary from a newer run beside it
+        write_page(args.summary, summary)
     if state:
         write_state(state, rep, today)
 

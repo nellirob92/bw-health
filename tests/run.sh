@@ -17,6 +17,21 @@ expect() { # expect <file> <regex> <description>
 # The report is one HTML page built straight from the data. tests/report_text.py flattens it into lines
 # (headings, '| a | b |' table rows, one line per card or paragraph) so the checks below can grep it.
 flat() { uv run --quiet tests/report_text.py "$1" >"${1%.html}.txt"; } # <page.html>: writes page.txt beside it
+totals() { grep -E '^Total [0-9]+ Sites |^[0-9]+ need work [0-9]+ with nothing to do$|^Check-up of ' "$1" | sed -E 's/^(Check-up of [0-9-]+ [0-9:]+)\..*/\1/'; } # <flat page>
+same_totals() { # same_totals <flat report> <flat summary> <what>: both pages of one run give the same sites, need work and time
+  [ "$(totals "$1")" = "$(totals "$2")" ] && [ "$(totals "$1" | wc -l | tr -d ' ')" = "3" ] || { diff <(totals "$1") <(totals "$2") || true; echo "FAIL the report and the summary of one run differ: $3"; exit 1; }
+  pass "the report and the summary of one run give the same totals and check-up time: $3"
+}
+leak_check() { # leak_check <summary.html> <vault json...>: no username, host, domain, item id or link of these vaults is in it
+  local words="$WORK/leak-words.txt" long="$WORK/leak-long.txt" short="$WORK/leak-short.txt" page="$1" summary="$WORK/leak-summary.txt"; shift
+  uv run --quiet tests/report_text.py "$page" | sed '1{/^# Bitwarden summary/d;}' >"$summary"   # the heading names the profile, by design
+  /usr/bin/jq -r '.[] | .id, (.login.username // empty), (.login.uris[]?.uri // empty | (capture("^[a-zA-Z]+://(?<h>[^/:?#\" ]+)") | .h)? // empty | ., (split(".") | if length > 1 then .[-2:] | join(".") else empty end))' "$@" \
+    | grep -vE '^[0-9]*$|^.$' | sort -u >"$words"   # a bare number is a count's twin and one letter is a word's: neither can be told apart
+  awk 'length >= 5' "$words" >"$long"; awk 'length < 5' "$words" >"$short"
+  ! grep -iF -f "$long" "$summary" && ! grep -iwF -f "$short" "$summary" || { echo "FAIL the summary holds a username, host, domain or item id ($summary)"; exit 1; }
+  ! grep -qiE 'https?://|href=|itemId' "$summary" "$page" || { echo "FAIL the summary holds a link ($page)"; exit 1; }
+  pass "no username, host, domain, item id or link of the vault is in the summary ($(wc -l <"$words" | tr -d ' ') checked in ${page##*/})"
+}
 uv run --quiet bw_report.py --input "$FX/items.json" --no-hibp --no-twofa --out "$WORK/report.html" >/dev/null
 flat "$WORK/report.html"; T="$WORK/report.txt"
 expect "$T" '^Logins with a password: 5 · In trash \(ignored, empty it\): 1 · ' "report counts live logins and leaves out the trash"
@@ -322,11 +337,22 @@ expect "$DT" "^\| http://\.something \| dot \| address isn't a web address \|$" 
 pass "identity sites rank first; an address that isn't a web address is named, never linked"
 
 DS="$WORK/d-summary.txt"
+same_totals "$DT" "$DS" "the dashboard fixture"
+expect "$DS" "^## What we'll do$" "the summary says what we will do, after the headline"
+[ "$(sed -n "/^## What we'll do/,/^Total /p" "$DS" | sed -n '2,4p' | cut -d' ' -f1-2 | tr '\n' '|')" = "Email and|Then money|Then the|" ] || { sed -n "/^## What we'll do/,/^Total /p" "$DS"; echo "FAIL the steps must go email and main accounts, then money, then the rest"; exit 1; }
+expect "$DS" '^Email and main accounts first .*: 4 sites need work\. .*turn on two-step login wherever the site offers it\.$' "step 1 counts the first-tier sites and says to turn on two-step login"
+expect "$DS" '^Then money .*: nothing needs work here\.$' "a step with nothing to do says so, without instructions"
+expect "$DS" '^Then the rest: 19 sites need work\. ' "the last step counts every other site"
+! grep -qE '^(Old|[2-4] · [^0-9]*) 0$' "$DS" || { grep -E ' 0$' "$DS"; echo "FAIL the summary drew a bar for a count of 0"; exit 1; }
+expect "$DS" '^Exposed not checked$' "a check that did not run is still shown in the summary, as not checked"
+expect "$DT" '^Old 0$' "the report still draws every bar, 0 included"
+pass "the summary hides bars whose count is 0"
 expect "$DS" '^# Bitwarden summary for mom$' "the summary names the profile"
 expect "$DS" '^## How an attacker or AI tool would use this$' "the summary explains the risks in plain words"
 expect "$DS" '^Reused One leak from any site unlocks every other site' "one line per kind of risk"
 expect "$DS" '^Everything else: [0-9]+ sites need work \(' "risks are counted by kind of site"
-SUMMARY_LEAK='bigbank|github|\.test|example|evil|member|admin|localhost|192\.168|jo\*\*n|script|@|ssa|id\.me|\.gov|google|gmail|something'
+leak_check "$WORK/d-summary.html" "$D"
+SUMMARY_LEAK='\.test|example\.|@|localhost|192\.168|<script'   # shapes no summary text has, beside the vault's own words above
 ! grep -qiE "$SUMMARY_LEAK" "$DS" || { grep -iE "$SUMMARY_LEAK" "$DS"; echo "FAIL the summary holds a site, a username or a host"; exit 1; }
 ! grep -q 'href=\|itemId\|data-ids\|<script' "$WORK/d-summary.html" || { echo "FAIL the summary holds a link, an item id or a script"; exit 1; }
 [ "$(stat -f %Lp "$WORK/d-summary.html")" = "600" ] || { echo "FAIL the summary is not owner-only"; exit 1; }
@@ -985,6 +1011,10 @@ expect "$WORK/mu1.log" "A summary to share with family \(counts only: no site, u
 expect "$WORK/mu1.log" "These files are mom's. Import them only into the vault of mom@example.com" "the import step names the vault the files are for"
 [ "$(ls "$MOM/Reports" | tr '\n' '|' | sed -E 's/[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{6}/STAMP/')" = "Bitwarden Report - mom STAMP.html|Bitwarden Summary - mom.html|progress.json|" ] || { echo "FAIL mom's Reports folder must hold one dated report, the summary and the progress file"; ls "$MOM/Reports" || true; exit 1; }
 expect "$(newest_report "$MOM")" 'Logins with a password: 5 ·' "mom's report is her vault, in her own Reports folder"
+uv run --quiet tests/report_text.py "$(newest_report "$MOM")" >"$WORK/mom-report.txt"
+uv run --quiet tests/report_text.py "$MOM/Reports/Bitwarden Summary - mom.html" >"$WORK/mom-summary.txt"
+same_totals "$WORK/mom-report.txt" "$WORK/mom-summary.txt" "mom's run through the paste line"
+leak_check "$MOM/Reports/Bitwarden Summary - mom.html" "$WORK/vaults/mom@example.com.json"
 expect "$(newest_report "$MOM")" '<strong>First check-up of this vault on this Mac: [0-9]+ sites? needs? work\.</strong>' "a first report says it is the first"
 [ "$(stat -f %Lp "$MOM/Reports")$(stat -f %Lp "$(newest_report "$MOM")")$(stat -f %Lp "$MOM/Reports/progress.json")" = "700600600" ] || { echo "FAIL the Reports folder, the report and the progress file must be owner-only"; exit 1; }
 [ "$(tail -1 "$WORK/mu1.log")" = "==> Done. The report is open in your browser. It is kept in $MOM/Reports, not on the Desktop. Your vault is locked again." ] || { tail -2 "$WORK/mu1.log"; echo "FAIL the closing line must say where the report is kept"; exit 1; }
@@ -1018,6 +1048,7 @@ expect "$WORK/mu2s.log" "The summary to share is open in your browser: counts on
 [ "$(ls "$DAD/Reports" | tr '\n' '|')" = "$DAD_REPORTS" ] && [ "$(shasum "$DAD/Reports/progress.json")" = "$DAD_PROGRESS" ] || { ls "$DAD/Reports"; echo "FAIL --summary-only wrote a report or changed the progress file"; exit 1; }
 [ "$(cat "$MU_OPENLOG")" = "$DAD/Reports/Bitwarden Summary - dad.html" ] && ! grep -q 'Password exports in Downloads' "$WORK/mu2s.log" || { cat "$MU_OPENLOG"; echo "FAIL --summary-only must open the summary and nothing else, with no import step"; exit 1; }
 ! grep -qi 'dadbank\|Dad bank\|example\|href=' "$DAD/Reports/Bitwarden Summary - dad.html" || { echo "FAIL the summary holds a site, a name or a link"; exit 1; }
+leak_check "$DAD/Reports/Bitwarden Summary - dad.html" "$WORK/vaults/dad@example.com.json"
 pass "--summary-only writes and opens the summary alone"
 
 # mom again: her profile is still signed in, so this is an unlock. --logout-after with a bw that cannot
@@ -1102,6 +1133,7 @@ expect "$WORK/mu10.log" "Moved Google Passwords.csv to Bitwarden Import/chrome-p
 [ -f "$MU_APP/data/account" ] && [ -f "$MU_APP/Bitwarden Import/new-for-bitwarden.csv" ] || { echo "FAIL a run without --user must use the shared sign-in and import folder"; exit 1; }
 expect "$(newest_report "$MU_APP")" 'Logins with a password: 5 ·' "without --user the report goes to the shared Reports folder"
 [ "$(ls "$MU_APP/Reports" | tr '\n' '|' | sed -E 's/[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{6}/STAMP/')" = "Bitwarden Report STAMP.html|Bitwarden Summary.html|progress.json|" ] || { ls "$MU_APP/Reports"; echo "FAIL the shared Reports folder must hold one dated report, the summary and the progress file"; exit 1; }
+leak_check "$MU_APP/Reports/Bitwarden Summary.html" "$WORK/vaults/owner@example.com.json"
 [ "$(tail -1 "$WORK/mu10.log")" = "==> Done. The report is open in your browser. It is kept in $MU_APP/Reports, not on the Desktop. Your vault is locked again." ] || { tail -2 "$WORK/mu10.log"; echo "FAIL without --user the closing line must name the shared Reports folder"; exit 1; }
 [ "$(ls -A "$MU_HOME/Desktop")" = "Bitwarden Report - mom.html" ] && ! grep -q 'older report' "$WORK/mu10.log" || { echo "FAIL a run without --user wrote to the Desktop, or pointed at another person's old report"; exit 1; }
 [ "$(bw_calls_since "$CALLS" | tail -1)" = "data lock" ] || { echo "FAIL without --logout-after the run must end by locking, not signing out"; exit 1; }

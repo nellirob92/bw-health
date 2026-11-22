@@ -64,7 +64,7 @@ FILES="bw_report.py bw_import_diff.py bw_dedupe.py fix_order.txt public_suffix_l
 # SHA-256 of each fetched file. `bash tests/run.sh` fails, and prints the right value, when one is stale.
 pinned_sha256() { # <file name>
   case "$1" in
-    bw_report.py)      echo "e27f8bb4ba8b055edadda832c162655a297cc8050f69dbaf4b030f74b08e288a" ;;
+    bw_report.py)      echo "b3f32a63c793a2a79beb332864c7dfc1b54432718a92d895b48a9f4ca022f4cb" ;;
     bw_import_diff.py) echo "5c01fa14640d0de6e844cde52944cbef8d116ed91fb2ce3f064430ff17bdf37c" ;;
     bw_dedupe.py)      echo "3814b2bf812894de6a5b8957b6ffdf076798eb1f506451cf050ad8bece1dc0f3" ;;
     fix_order.txt)     echo "41a48bd1b954f15c5ad4b8503cabd974b9e036f8ab08d6ad685911b8fdd6f55b" ;;
