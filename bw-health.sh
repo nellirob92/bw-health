@@ -57,7 +57,7 @@ esac
 
 # A release is a tag. This script fetches its files from the tag of its own version and uses each
 # one only if it matches the checksum below, so no run depends on whatever is on main.
-VERSION="1.1.0"
+VERSION="1.1.1"
 RELEASE_URL="https://raw.githubusercontent.com/nellirob92/bw-health/v$VERSION"
 BASE_URL="${BW_HEALTH_BASE_URL:-$RELEASE_URL}"
 FILES="bw_report.py bw_import_diff.py bw_dedupe.py fix_order.txt public_suffix_list.dat"
@@ -66,7 +66,7 @@ pinned_sha256() { # <file name>
   case "$1" in
     bw_report.py)      echo "b3f32a63c793a2a79beb332864c7dfc1b54432718a92d895b48a9f4ca022f4cb" ;;
     bw_import_diff.py) echo "5c01fa14640d0de6e844cde52944cbef8d116ed91fb2ce3f064430ff17bdf37c" ;;
-    bw_dedupe.py)      echo "3814b2bf812894de6a5b8957b6ffdf076798eb1f506451cf050ad8bece1dc0f3" ;;
+    bw_dedupe.py)      echo "f9474369698b3a11042fafa7ce351abbe77d092c800e9af0255c88c0dbf2bd9f" ;;
     fix_order.txt)     echo "41a48bd1b954f15c5ad4b8503cabd974b9e036f8ab08d6ad685911b8fdd6f55b" ;;
     public_suffix_list.dat) echo "3084c6ca4ac1dfb6e32461504b5dc494cc58ace521957e9e978ed0f870b2de94" ;;
     *) fail "no checksum is written in bw-health.sh for $1" ;;

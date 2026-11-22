@@ -20,7 +20,7 @@ It works on the free Bitwarden plan.
 Open Terminal (press Command-Space, type `Terminal`, press Return), paste this line, press Return:
 
 ```
-curl -fsSL https://raw.githubusercontent.com/nellirob92/bw-health/v1.1.0/bw-health.sh | bash
+curl -fsSL https://raw.githubusercontent.com/nellirob92/bw-health/v1.1.1/bw-health.sh | bash
 ```
 
 It asks for your Bitwarden email (the first time only), your master password, and the two-step code if
@@ -97,7 +97,7 @@ To check several people's vaults from one Mac account, one after another, give e
 `--user`. Add the words after `bash -s --` on the paste line:
 
 ```
-curl -fsSL https://raw.githubusercontent.com/nellirob92/bw-health/v1.1.0/bw-health.sh | bash -s -- --user mom
+curl -fsSL https://raw.githubusercontent.com/nellirob92/bw-health/v1.1.1/bw-health.sh | bash -s -- --user mom
 ```
 
 | Add this | What happens |
@@ -130,7 +130,7 @@ summary and the report show the same check-up time, so a pair from one run can b
 To write and open only the summary, with no report and no import step:
 
 ```
-curl -fsSL https://raw.githubusercontent.com/nellirob92/bw-health/v1.1.0/bw-health.sh | bash -s -- --summary-only
+curl -fsSL https://raw.githubusercontent.com/nellirob92/bw-health/v1.1.1/bw-health.sh | bash -s -- --summary-only
 ```
 
 ## Clean up duplicates
@@ -142,7 +142,7 @@ changes your vault when you add `apply` and then type `DEDUPE` after reading the
 Add the words after `bash -s --` on the paste line, for example:
 
 ```
-curl -fsSL https://raw.githubusercontent.com/nellirob92/bw-health/v1.1.0/bw-health.sh | bash -s -- dedupe merge
+curl -fsSL https://raw.githubusercontent.com/nellirob92/bw-health/v1.1.1/bw-health.sh | bash -s -- dedupe merge
 ```
 
 | Add this | What happens |

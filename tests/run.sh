@@ -526,6 +526,7 @@ case "$#:$1:$2" in
   1:sync:) echo 'Syncing complete.' ;;
   2:list:items) cat "$FAKE_BW_STATE" ;;
   2:list:folders) cat "$FAKE_BW_FOLDERS" ;;
+  2:list:organizations) echo "${FAKE_BW_ORGS:-[]}" ;;
   3:get:item) /usr/bin/jq --arg id "$3" '.[] | select(.id == $id)' "$FAKE_BW_STATE" ;;
   3:edit:item)
     new="$(base64 --decode)"
@@ -680,11 +681,24 @@ expect "$WORK/dd10.log" "id starts with '-'" "apply refuses an id that bw could 
 [ "$(grep -c '^delete' "$BWLOG")" = "$DELETES_BEFORE" ] || { echo "FAIL a delete ran before the dash id was refused"; exit 1; }
 pass "an option-like item id is refused before any bw call"
 
-# If bw never reports organizationId, shared items cannot be told apart, so nothing may run.
+# bw leaves organizationId off personal items. With no item carrying it, an account in an organization
+# cannot tell shared items apart, so nothing may run; an account in none is all personal and runs as usual.
 /usr/bin/jq 'map(del(.organizationId))' "$FX/dupes.json" >"$WORK/state-noorg.json"
-if ( STATE="$WORK/state-noorg.json"; dedupe "$WORK/tty-no" exact >"$WORK/dd11.log" 2>&1 ); then cat "$WORK/dd11.log"; echo "FAIL ran without any organizationId in the vault"; exit 1; fi
-expect "$WORK/dd11.log" 'belong to an organization' "a vault that never reports organizations is refused"
-pass "no organization information means no dedupe"
+if ( STATE="$WORK/state-noorg.json"; FAKE_BW_ORGS='[{"id":"org1","name":"Family"}]' dedupe "$WORK/tty-no" exact >"$WORK/dd11.log" 2>&1 ); then cat "$WORK/dd11.log"; echo "FAIL ran without any organizationId in a vault of an organization member"; exit 1; fi
+expect "$WORK/dd11.log" 'this account is in one' "a member of an organization with no organizationId on any item is refused"
+/usr/bin/jq 'map(select(.organizationId == null) | del(.organizationId))' "$FX/dupes.json" >"$WORK/state-personal.json"
+( STATE="$WORK/state-personal.json"; BWLOG="$WORK/bw-personal.log"; : >"$BWLOG"; dedupe "$WORK/tty-no" merge >"$WORK/dd12.log" 2>&1 ) \
+  || { cat "$WORK/dd12.log"; echo "FAIL a personal vault whose items carry no organizationId was refused"; exit 1; }
+expect "$WORK/dd12.log" '^10 group\(s\) to change, 8 left alone, 0 for another stage' "a personal vault with no organizationId field plans the same merges, less the shared group"
+expect "$WORK/bw-personal.log" '^list organizations$' "a vault with no organizationId field asks whether the account is in an organization"
+# The newer bw's shape: only shared items carry organizationId. The shared group is still left alone.
+/usr/bin/jq 'map(if .organizationId == null then del(.organizationId) else . end)' "$FX/dupes.json" >"$WORK/state-mixed.json"
+( STATE="$WORK/state-mixed.json"; BWLOG="$WORK/bw-mixed.log"; : >"$BWLOG"; dedupe "$WORK/tty-no" merge >"$WORK/dd13.log" 2>&1 ) \
+  || { cat "$WORK/dd13.log"; echo "FAIL a vault where only shared items carry organizationId was refused"; exit 1; }
+expect "$WORK/dd13.log" '^10 group\(s\) to change, 9 left alone, 0 for another stage' "only shared items carrying organizationId plans as before"
+expect "$PLANS/plan-merge.md" 'shared with an organization' "a shared group is still left alone when personal items carry no organizationId"
+! grep -q '^list organizations' "$WORK/bw-mixed.log" || { echo "FAIL asked for organizations although an item said it is shared"; exit 1; }
+pass "organizationId left off personal items: refused only when the account is in an organization"
 
 # --- dedupe and the AutoFill fix on tests/fixture/dashboard.json ---------------------------------------
 # One bank across secureNN subdomains, a co.uk pair and a passkey pair are each one account; two github.io

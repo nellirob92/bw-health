@@ -81,8 +81,11 @@ def load_items() -> list[dict]:
         sys.exit("Vault is not unlocked. Run: bw login, then export BW_SESSION=\"$(bw unlock --raw)\"")
     run_bw("sync")
     items = json.loads(run_bw("list", "items"))
-    if items and not any("organizationId" in i for i in items):
-        sys.exit("bw did not say which items belong to an organization, so shared items cannot be told apart. Nothing was changed.")
+    # bw leaves organizationId off a personal item, so a vault where no item carries it is all personal only
+    # when the account is in no organization; otherwise shared items cannot be told apart.
+    if items and not any("organizationId" in i for i in items) and json.loads(run_bw("list", "organizations")):
+        sys.exit("bw did not say which items belong to an organization, and this account is in one, so shared items "
+                 "cannot be told apart. Nothing was changed.")
     return items
 
 
