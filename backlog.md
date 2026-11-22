@@ -46,6 +46,13 @@ Work that was considered and left out, with the reason.
   A site where capitals make two accounts would be grouped as one; none is known.
 - **A masked username that fits two accounts** stays its own row; the report cannot say which account it
   belongs to, and nothing offers to fill in the real username.
+- **An address that isn't a web address shows in the AutoFill table's Site column.** It is escaped and never
+  linked, but the raw text stands where a site name should be. Show the entry's name, or "(no valid
+  address)", instead.
+- **Identical lines in a row's list of copies.** Two copies saved for the same host show that host twice;
+  collapse them to one line with "×2".
+- **The two-step table lists a masked username as an account of its own.** The masked-copy rule the main
+  table uses (fits exactly one plain username on the site) is not applied there yet.
 - **The shareable summary is replaced on every run**, never kept per date. A family member who wants the
   last one keeps their own copy.
 
