@@ -837,6 +837,108 @@ pv() { /usr/bin/jq -r --arg id "$1" ".[] | select(.id == \$id) | $2" "$WORK/stat
 ! grep -q 'PW-secret\|KEYDATA' "$WORK/pk1.log" "$WORK/pk2.log" "$WORK/pk3.log" "$WORK/pk4.log" "$WORK/pk5.log" "$WORK/pk2b.log" "$WORK/pk6.log" "$PLANS/plan-pick.md" || { echo "FAIL a password or passkey key reached the terminal or the plan"; exit 1; }
 pass "pick saves the chosen password on the kept copy, keeps a passkey, trashes the rest, and leaves skipped groups alone"
 
+# --- merge and rename entries the person names (tests/fixture/merge.json) -----------------------------
+# Same stand-in bw. Every secret in the fixture (password, note, field, seed, passkey key) holds LEAK, and the
+# leak check at the end greps every file these runs and the profile runs below write. Each run's temp folder is
+# its own, so a file written there is checked too. Cannot catch the real bw resolving or editing differently.
+MSTATE="$WORK/state-merge.json"; MBWLOG="$WORK/bw-merge.log"; MR="$WORK/mr"; mkdir -p "$MR/tmp"; : >"$MBWLOG"
+printf 'MERGE\n' >"$MR/tty-merge"; printf 'RENAME\n' >"$MR/tty-rename"; printf 'no\n' >"$MR/tty-no"
+entries() { # entries <tty file> <log> <step> <args...>: one merge-entries or rename run on the merge vault
+  local tty="$1" log="$2"; shift 2
+  PATH="$WORK/fakebin-state:$PATH" BW_SESSION=fake FAKE_BW_STATE="$MSTATE" FAKE_BW_FOLDERS="$FX/folders.json" FAKE_BW_LOG="$MBWLOG" \
+    BW_HEALTH_TTY="$tty" TMPDIR="$MR/tmp" TZ=UTC uv run --quiet bw_dedupe.py "$@" >"$log" 2>&1
+}
+mv_() { /usr/bin/jq -r --arg id "$1" ".[] | select(.id == \$id) | $2" "$MSTATE"; }
+unchanged() { # unchanged <what>: the vault is as the fixture left it and bw was never asked to edit or delete
+  cmp -s "$MSTATE" "$FX/merge.json" && ! grep -qE '^(edit|delete) ' "$MBWLOG" || { cat "$MBWLOG"; echo "FAIL the vault changed: $1"; exit 1; }
+}
+refused() { # refused <log> <regex> <what> <step> <args...>: the run stops, says why, and changes nothing
+  local log="$1" want="$2" what="$3"; shift 3
+  cp "$FX/merge.json" "$MSTATE"; : >"$MBWLOG"
+  if entries "$MR/tty-merge" "$log" "$@"; then cat "$log"; echo "FAIL $what was accepted"; exit 1; fi
+  expect "$log" "$want" "$what is refused, and says why"
+  expect "$log" 'Nothing was changed' "$what says nothing was changed"
+  unchanged "$what"
+}
+N1=aa11aa11-1111-4000-8000-000000000001; N2=aa11aa11-2222-4000-8000-000000000002
+
+# Picking an entry: an id, a unique start of one (8 characters or more), or a search that finds one live login.
+refused "$MR/amb.log" '^"netflix" matches 2 logins:$' "a search that finds two logins" merge-entries -- netflix hulu
+expect "$MR/amb.log" '^  aa11aa11-1  "Netflix"  ann@x.test  netflix.com$' "each candidate shows the start of its id (long enough to tell them apart), name, username and addresses"
+expect "$MR/amb.log" '^  aa11aa11-2  "Netflix \(Apple\)"   Ann@X.test   netflix.com, m.netflix.com$' "the other candidate is listed the same way"
+! grep -q 'old\|notes' "$MR/amb.log" || { echo "FAIL a trashed login or a secure note was offered as a candidate"; exit 1; }
+expect "$MR/amb.log" 'Run the line again with the id of the entry you mean' "an ambiguous search says to run again with the id"
+refused "$MR/prefix-amb.log" '^"aa11aa11" matches 2 logins:$' "an id start that fits two ids" rename -- aa11aa11 X
+refused "$MR/none.log" '^No login in your vault matches "nosuchsite" by name, username, web address or id\.$' "a search with no match" merge-entries -- nosuchsite hulu
+refused "$MR/short.log" '^No login in your vault matches "bb22bb2" ' "an id start shorter than 8 characters (it is only a search)" rename -- bb22bb2 X
+expect "$MR/short.log" "Check the spelling, or use the entry's id" "no match says how to name the entry instead"
+refused "$MR/self.log" 'The entry to keep, "Netflix", is also named as an entry to fold in' "the entry to keep named again to fold in" merge-entries -- "$N1" www.netflix
+refused "$MR/twice.log" 'The same entry is named twice' "one entry named twice to fold in" merge-entries -- "$N1" "$N2" aa11aa11-2
+
+# The guards: different usernames, a masked one, and every reason the duplicate cleanup leaves copies alone.
+refused "$MR/users.log" '^Not merged: the usernames differ \(carl@x.test, carla@x.test\)\.' "different usernames" merge-entries -- cc33cc33-1 carla@
+refused "$MR/masked.log" "^Not merged: a copy's username is masked with \\*, so it may be a different account\\." "a masked username" merge-entries -- dd44dd44-1 dd44dd44-2
+for spec in "ee01:shared with an organization" "ee02:has an attachment" "ee03:several copies hold a passkey" "ee04:different one-time-code seeds" \
+            "ee05:a custom field with different values" "ee06:a copy has password history the kept copy lacks" "ee07:an entry to fold in holds a passkey, which cannot be moved"; do
+  g="${spec%%:*}"; why="${spec#*:}"
+  refused "$MR/block-$g.log" "^Not merged: $why" "a merge where $why" merge-entries -- "$g$g-1" "$g$g-2"
+done
+pass "an entry must be found exactly once, and a merge is refused for different usernames and every dedupe reason but the password"
+
+# The keeper's password stays; a different one is shown as a letter. Declining changes nothing.
+cp "$FX/merge.json" "$MSTATE"; : >"$MBWLOG"
+if entries "$MR/tty-no" "$MR/decline.log" merge-entries -- aa11aa11-1 "netflix (apple)"; then echo "FAIL a merge went ahead without MERGE"; exit 1; fi
+expect "$MR/decline.log" '^  KEEP   "Netflix"  folder: Streaming  1 URL$' "the plan shows the entry kept"
+expect "$MR/decline.log" '^  TRASH  "Netflix \(Apple\)"  folder: Apple  2 URLs$' "the plan shows the entry trashed"
+expect "$MR/decline.log" '^  ADDS   \+1 URL \(https://m.netflix.com\), \+1 custom field, notes joined, one-time-code seed taken$' "the plan shows what the kept entry gains"
+expect "$MR/decline.log" '^    A  "Netflix"  password changed 2025-03-01 10:00, edited 2026-01-01 00:00, created 2024-01-01 00:00  \(kept\)$' "the kept password is A, with its dates"
+expect "$MR/decline.log" '^    B  "Netflix \(Apple\)"  edited 2026-02-01 00:00, created 2025-06-01 00:00$' "the other password is B, with its dates"
+expect "$MR/decline.log" 'Password B is dropped: it goes to the Bitwarden trash with its entry, where it stays for 30 days' "the plan says plainly that the other password goes to the trash"
+expect "$MR/decline.log" 'Type MERGE to continue: Not confirmed\. Nothing was changed\.$' "anything but MERGE stops the merge"
+unchanged "a declined merge"
+pass "a merge shows its plan with the passwords as letters, and declining it changes nothing"
+
+cp "$FX/merge.json" "$MSTATE"; : >"$MBWLOG"
+entries "$MR/tty-merge" "$MR/merge.log" merge-entries -- aa11aa11-1 "netflix (apple)" || { cat "$MR/merge.log"; echo "FAIL merge"; exit 1; }
+[ "$(mv_ "$N1" '[.login.uris[].uri] | join(" ")')" = "https://www.netflix.com https://m.netflix.com" ] || { mv_ "$N1" .login.uris; echo "FAIL the kept entry must gain the other's new address once"; exit 1; }
+[ "$(mv_ "$N1" '.notes | contains("LEAK-note-kept") and contains("LEAK-note-folded")')" = "true" ] && [ "$(mv_ "$N1" '.fields | length')" = "2" ] && [ "$(mv_ "$N1" .login.totp)" = "otpauth://totp/n?secret=LEAKSEED" ] || { echo "FAIL the kept entry lost a note, a field or the one-time code"; exit 1; }
+[ "$(mv_ "$N1" .login.password)" = "LEAK-pw-netflix-kept" ] && [ "$(mv_ "$N1" .name)" = "Netflix" ] && [ "$(mv_ "$N1" .login.username)" = "ann@x.test" ] || { echo "FAIL the kept entry's password, name or username changed"; exit 1; }
+[ "$(mv_ "$N1" .deletedDate)" = "null" ] && [ "$(mv_ "$N2" .deletedDate)" != "null" ] || { echo "FAIL the folded entry must go to the trash and the kept one stay"; exit 1; }
+[ "$(tr '\n' '|' <"$MBWLOG" | sed 's/^status|sync|list items|list folders|//')" = "edit item $N1|get item $N1|delete item $N2|" ] || { cat "$MBWLOG"; echo "FAIL a merge must list the vault once, edit the kept entry, read it back, then trash the other"; exit 1; }
+expect "$MR/merge.log" "\[1/1\] netflix.com \(ann@x.test\): kept one, trashed 1$" "the merge reports what it did"
+pass "a merge carries addresses, notes, fields and the one-time code into the kept entry, reads it back, then trashes the other"
+
+cp "$FX/merge.json" "$MSTATE"; : >"$MBWLOG"
+if FAKE_BW_EDIT_BUG=drop-fields entries "$MR/tty-merge" "$MR/merge-bad.log" merge-entries -- "$N1" "$N2"; then cat "$MR/merge-bad.log"; echo "FAIL a merge went on after a bad edit"; exit 1; fi
+expect "$MR/merge-bad.log" 'bw saved a different custom fields than was sent' "a merge whose edit did not come back as sent is caught"
+! grep -q '^delete' "$MBWLOG" && [ "$(mv_ "$N2" .deletedDate)" = "null" ] || { echo "FAIL a merge trashed an entry after a bad edit"; exit 1; }
+pass "a merge stops before trashing when the read-back differs"
+
+# Rename: only the name changes, read back, after RENAME.
+B1=bb22bb22-0000-4000-8000-000000000001
+cp "$FX/merge.json" "$MSTATE"; : >"$MBWLOG"
+entries "$MR/tty-rename" "$MR/rename.log" rename -- hulu.com "Hulu (family)" || { cat "$MR/rename.log"; echo "FAIL rename"; exit 1; }
+expect "$MR/rename.log" '^  FROM   "Hulu"$' "rename shows the old name"
+expect "$MR/rename.log" '^  TO     "Hulu \(family\)"$' "rename shows the new name"
+[ "$(/usr/bin/jq -c --arg id "$B1" 'map(select(.id != $id))' "$MSTATE")" = "$(/usr/bin/jq -c --arg id "$B1" 'map(select(.id != $id))' "$FX/merge.json")" ] \
+  && [ "$(mv_ "$B1" 'del(.name)' | /usr/bin/jq -c .)" = "$(/usr/bin/jq -c --arg id "$B1" '.[] | select(.id == $id) | del(.name)' "$FX/merge.json")" ] \
+  && [ "$(mv_ "$B1" .name)" = "Hulu (family)" ] || { echo "FAIL rename must change the name and nothing else"; exit 1; }
+[ "$(grep -cE '^(edit|get) item ' "$MBWLOG")" = "2" ] && ! grep -q '^delete' "$MBWLOG" || { cat "$MBWLOG"; echo "FAIL rename must edit once, read back once and trash nothing"; exit 1; }
+cp "$FX/merge.json" "$MSTATE"; : >"$MBWLOG"
+if entries "$MR/tty-no" "$MR/rename-no.log" rename -- bb22bb22 "Hulu (family)"; then echo "FAIL a rename went ahead without RENAME"; exit 1; fi
+expect "$MR/rename-no.log" 'Not confirmed. Nothing was changed.' "a declined rename says so"
+unchanged "a declined rename"
+entries "$MR/tty-rename" "$MR/rename-same.log" rename -- bb22bb22 Hulu || { cat "$MR/rename-same.log"; echo "FAIL a rename to the same name must succeed"; exit 1; }
+expect "$MR/rename-same.log" '^Nothing to do: the entry is already named "Hulu"\.$' "a rename to the name it has does nothing"
+unchanged "a rename to the same name"
+if FAKE_BW_EDIT_BUG=rename entries "$MR/tty-rename" "$MR/rename-bad.log" rename -- bb22bb22 "Hulu (family)"; then echo "FAIL a rename went on after a bad edit"; exit 1; fi
+expect "$MR/rename-bad.log" 'bw saved a different name or folder than was sent' "a rename that did not come back as sent is caught"
+for bad in '' '   ' "$(printf 'two\nlines')"; do
+  refused "$MR/rename-empty.log" 'The new name must have something in it, on one line' "the new name '$bad'" rename -- bb22bb22 "$bad"
+done
+refused "$MR/rename-org.log" '^Not renamed: it is shared with an organization\.' "renaming an entry shared with an organization" rename -- ee01ee01-2 X
+pass "rename changes only the name after RENAME, reads it back, and refuses an empty name"
+
 # The entry point refuses a bad dedupe request before it asks for a master password. Cannot catch
 # a valid request misbehaving after sign-in; that needs a real vault.
 for bad in "bogus" "exact later" "exact 5" "exact apply 1 extra" "exact apply abc" "merge apply 0"; do
@@ -907,6 +1009,15 @@ for bad in "fixurls now" "fixurls apply 0" "fixurls 2" "fixurls apply 1 extra"; 
 done
 refuse '--summary-only goes with the check-up itself, not with dedupe' --summary-only dedupe merge
 refuse '--summary-only goes with the check-up itself, not with fixurls' --user mom fixurls --summary-only
+refuse 'unknown step: bogus\. .*use check, exports, dedupe, fixurls, merge, rename or logout' bogus
+refuse '^Something went wrong: use: merge "<entry to keep>" "<entry to fold in>"' merge
+refuse '^Something went wrong: use: merge ' merge Netflix
+refuse 'an entry to merge cannot be empty' merge Netflix ''
+refuse '^Something went wrong: use: rename "<entry>" "<new name>"' rename Netflix
+refuse '^Something went wrong: use: rename ' rename Netflix New name
+refuse 'the entry to rename cannot be empty' rename '' New
+refuse 'the new name must have something in it' rename Netflix ' '
+refuse 'the new name must be on one line' rename Netflix "$(printf 'two\nlines')"
 pass "a bad profile name, option or step is refused before anything is installed"
 
 # --- where the report scripts come from --------------------------------------------------------------
@@ -938,7 +1049,8 @@ pass "a checkout runs its own files; the paste line and BW_HEALTH_BASE_URL fetch
 
 # --- several people on one Mac account: --user NAME ---------------------------------------------------
 # A stand-in bw that keeps its sign-in in the data folder it is pointed at, as the real one does, and
-# serves a different vault per account. `open` is a stand-in too, so no browser or Finder window opens.
+# serves a different vault per account. Each login or unlock hands out a new session key that opens only
+# that data folder, until it is locked. `open` is a stand-in too, so no browser or Finder window opens.
 # Cannot catch the real bw signing in, locking or signing out differently from this model.
 MU_HOME="$WORK/mu-home"; MU_APP="$MU_HOME/Library/Application Support/bw-health"; MU_DL="$MU_HOME/Downloads"
 MOM="$MU_APP/profiles/mom"; DAD="$MU_APP/profiles/dad"; MU_BWLOG="$WORK/mu-bw.log"; MU_OPENLOG="$WORK/mu-open.log"
@@ -951,22 +1063,22 @@ echo "${D#*/bw-health/} $*" >>"$FAKE_BW_LOG"
 case "$1" in
   status)
     if [ -f "$D/account" ]; then
-      state=locked; [ -z "${BW_SESSION:-}" ] || state=unlocked
+      state=locked; [ -z "${BW_SESSION:-}" ] || [ "$BW_SESSION" != "$(cat "$D/session" 2>/dev/null)" ] || state=unlocked
       echo "{\"status\":\"$state\",\"userEmail\":\"$(cat "$D/account")\"}"
     else
       echo '{"status":"unauthenticated","userEmail":null}'
     fi ;;
   login)
     [ ! -f "$D/account" ] || { echo "You are already logged in." >&2; exit 1; }
-    echo "$FAKE_BW_EMAIL" >"$D/account"; echo "session-key" ;;
-  unlock) [ -f "$D/account" ] || { echo "You are not logged in." >&2; exit 1; }; echo "session-key" ;;
-  lock) ;;
+    echo "$FAKE_BW_EMAIL" >"$D/account"; echo "key-$RANDOM$RANDOM" | tee "$D/session" ;;
+  unlock) [ -f "$D/account" ] || { echo "You are not logged in." >&2; exit 1; }; echo "key-$RANDOM$RANDOM" | tee "$D/session" ;;
+  lock) rm -f "$D/session" ;;
   logout)
     [ -f "$D/account" ] || { echo "You are not logged in." >&2; exit 1; }
     case "${FAKE_BW_LOGOUT_BUG:-}" in
       fails) echo "Logout failed." >&2; exit 1 ;;
       silent) ;;
-      *) rm "$D/account" ;;
+      *) rm -f "$D/account" "$D/session" ;;
     esac ;;
   sync) echo 'Syncing complete.' ;;
   list)
@@ -986,9 +1098,9 @@ cp "$FX/dupes.json" "$WORK/vaults/kelly@example.com.json"
 echo '[{"id":"d1","type":1,"name":"Dad bank","deletedDate":null,"login":{"username":"dad","password":"Vt6#qLp9$wZ3mK8x!r","uris":[{"uri":"https://dadbank.example.com"}]}}]' >"$WORK/vaults/dad@example.com.json"
 UV_CACHE="$(uv cache dir)"; UV_PYTHONS="$(uv python dir)"  # the stand-in home must not download Python again
 : >"$MU_BWLOG"; : >"$MU_OPENLOG"
-mu() { # mu <account email> <tty file> <args...>: one run from this checkout, with its own scripts
+mu() { # mu <account email> <tty file> <args...>: one run from this checkout, with its own scripts; MU_SESSION sets BW_SESSION
   local email="$1" tty="$2"; shift 2
-  env -u BW_SESSION -u BW_HEALTH_BASE_URL HOME="$MU_HOME" PATH="$WORK/mu-bin:$PATH" UV_CACHE_DIR="$UV_CACHE" UV_PYTHON_INSTALL_DIR="$UV_PYTHONS" \
+  env -u BW_SESSION -u BW_HEALTH_BASE_URL ${MU_SESSION:+"BW_SESSION=$MU_SESSION"} HOME="$MU_HOME" PATH="$WORK/mu-bin:$PATH" UV_CACHE_DIR="$UV_CACHE" UV_PYTHON_INSTALL_DIR="$UV_PYTHONS" \
     BW_HEALTH_TTY="$tty" FAKE_BW_EMAIL="$email" FAKE_BW_LOG="$MU_BWLOG" FAKE_BW_VAULTS="$WORK/vaults" FAKE_BW_FOLDERS="$FX/folders.json" \
     FAKE_OPEN_LOG="$MU_OPENLOG" /bin/bash bw-health.sh "$@"
 }
@@ -1156,6 +1268,43 @@ mu owner@example.com /dev/null logout >"$WORK/mu11.log" 2>&1 || { cat "$WORK/mu1
 expect "$WORK/mu11.log" '^==> Bitwarden is signed out on this Mac\.$' "logout without --user signs out the shared sign-in"
 [ ! -e "$MU_APP/data/account" ] || { echo "FAIL the shared sign-in is still signed in"; exit 1; }
 pass "without --user everything is where it was; logout works there too"
+
+# --- merge and rename through the entry point, and a vault already open in this window ----------------------
+# lee's vault is tests/fixture/merge.json. This stand-in bw cannot edit, so these runs stop at the typed word or
+# at the candidate list; the edits themselves are tested above. Cannot catch the real bw judging a session key
+# differently from this model (a key opens only the data folder that issued it, until a lock).
+cp "$FX/merge.json" "$WORK/vaults/lee@example.com.json"; LEE="$MU_APP/profiles/lee"
+CALLS="$(wc -l <"$MU_BWLOG")"
+if mu lee@example.com "$WORK/tty-no" --user lee rename hulu.com "-Hulu" >"$WORK/mu12.log" 2>&1; then cat "$WORK/mu12.log"; echo "FAIL a rename went ahead without RENAME"; exit 1; fi
+expect "$WORK/mu12.log" "Profile lee: sign in to Bitwarden" "with no open vault, rename signs in as before"
+expect "$WORK/mu12.log" '^  TO     "-Hulu"$' "a new name starting with - reaches the rename as a name, not an option"
+expect "$WORK/mu12.log" 'Not confirmed. Nothing was changed.' "the entry point's rename stops without RENAME"
+[ "$(bw_calls_since "$CALLS" | tail -1)" = "profiles/lee/data lock" ] || { bw_calls_since "$CALLS"; echo "FAIL a run that unlocked must lock at the end"; exit 1; }
+LEE_KEY="$(BITWARDENCLI_APPDATA_DIR="$LEE/data" FAKE_BW_LOG="$MU_BWLOG" "$MU_APP/bin/bw" unlock --raw)"
+CALLS="$(wc -l <"$MU_BWLOG")"
+if MU_SESSION="$LEE_KEY" mu lee@example.com /dev/null merge netflix hulu --user lee >"$WORK/mu13.log" 2>&1; then cat "$WORK/mu13.log"; echo "FAIL a merge with an ambiguous search went ahead"; exit 1; fi
+expect "$WORK/mu13.log" '^==> Using the vault already open in this window\.' "a vault already open in this window is used, and the run says so"
+expect "$WORK/mu13.log" 'Profile lee: this run uses the vault of lee@example.com' "an open vault still names its account"
+expect "$WORK/mu13.log" '^  aa11aa11-1  "Netflix"  ann@x.test  netflix.com$' "the entry point's merge lists the candidates of an ambiguous search"
+! bw_calls_since "$CALLS" | grep -qE ' (login|unlock|lock)( |$)' || { bw_calls_since "$CALLS"; echo "FAIL a run on an open vault signed in, unlocked or locked"; exit 1; }
+MU_SESSION="$LEE_KEY" mu lee@example.com "$WORK/tty-skip" --user lee >"$WORK/mu14.log" 2>&1 || { cat "$WORK/mu14.log"; echo "FAIL a check-up on an open vault"; exit 1; }
+[ "$(tail -1 "$WORK/mu14.log")" = "==> Done. The report is open in your browser. It is kept in $LEE/Reports, not on the Desktop. Your vault is still open in this window, as it was." ] || { tail -2 "$WORK/mu14.log"; echo "FAIL a check-up on an open vault must say it is left open"; exit 1; }
+! bw_calls_since "$CALLS" | grep -qE ' (login|unlock|lock)( |$)' && [ "$(cat "$LEE/data/session")" = "$LEE_KEY" ] || { bw_calls_since "$CALLS"; echo "FAIL a check-up on an open vault must leave it open"; exit 1; }
+pass "a vault already open in this window is used and left open: no unlock, no lock"
+KELLY_KEY="$(BITWARDENCLI_APPDATA_DIR="$MU_APP/profiles/kelly/data" FAKE_BW_LOG="$MU_BWLOG" "$MU_APP/bin/bw" unlock --raw)"
+CALLS="$(wc -l <"$MU_BWLOG")"
+if MU_SESSION="$KELLY_KEY" mu lee@example.com "$WORK/tty-no" --user lee rename hulu.com X >"$WORK/mu15.log" 2>&1; then cat "$WORK/mu15.log"; echo "FAIL a rename went ahead without RENAME"; exit 1; fi
+! grep -q 'already open' "$WORK/mu15.log" && expect "$WORK/mu15.log" 'Profile lee is signed in as lee@example.com. Unlock that vault' "another profile's open vault is not used: this profile is unlocked" \
+  || { cat "$WORK/mu15.log"; echo "FAIL another profile's session key was taken as this profile's open vault"; exit 1; }
+[ "$(bw_calls_since "$CALLS" | grep -E ' (unlock|lock)( |$)' | tr '\n' '|')" = "profiles/lee/data unlock --raw|profiles/lee/data lock|" ] && [ "$(cat "$MU_APP/profiles/kelly/data/session")" = "$KELLY_KEY" ] \
+  || { bw_calls_since "$CALLS"; echo "FAIL with another profile's key the run must unlock and lock its own profile only"; exit 1; }
+pass "a session key that opens another profile's vault is not used"
+
+# No secret of the merge vault reached the terminal or any file a run wrote: logs, plans, reports, temp folders.
+leaks="$(grep -D skip -rlF LEAK "$WORK" | grep -vxF -e "$WORK/vaults/lee@example.com.json" -e "$MSTATE" || true)"
+[ -z "$leaks" ] || { echo "$leaks"; echo "FAIL a password, note, field, seed or passkey key of the merge vault was written outside the vault"; exit 1; }
+[ "$(grep -rlF 'Netflix' "$MR" "$WORK"/mu1[2-5].log | wc -l | tr -d ' ')" -gt 0 ] || { echo "FAIL test setup: the leak check found none of the runs' output"; exit 1; }
+pass "no secret of the merge vault is in any output or file the merge, rename and profile runs wrote"
 
 # No person is named in the tool, its messages, its tests or its docs: whoever shares the paste line is
 # "the person who sent you this line". Cannot catch a name other than the one it looks for. The public suffix

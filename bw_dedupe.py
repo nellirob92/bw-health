@@ -2,7 +2,7 @@
 # /// script
 # requires-python = ">=3.11"
 # ///
-"""Trash or merge duplicate logins in a Bitwarden vault, or add https:// addresses, one stage at a time.
+"""Trash or merge duplicate logins in a Bitwarden vault, add https:// addresses, or merge or rename chosen entries.
 
 A duplicate group is the same site and username (case-insensitive), the grouping the health
 report uses. A site is a web address's registrable domain, taken from the public suffix list
@@ -30,6 +30,14 @@ attachment, several passkeys or one listed without its key, password history the
 that holds a passkey (an edit rewrites the whole login), one shared with an organization, and one
 whose addresses are devices at home. Without --apply this only writes a plan. Trashed copies stay
 in the web vault's Trash for 30 days; this script never deletes permanently.
+
+Two steps act on entries the person names, each by its id (8 characters or more) or a search of
+names, usernames and addresses that finds exactly one live login:
+
+  merge-entries  the first entry is kept and gains what the others add, as in the merge stage, then
+                 the others go to the trash. Its password stays, even when the others' differ; every
+                 other reason a group is left alone still refuses, and so do different usernames.
+  rename         one entry gets a new name; nothing else changes.
 """
 
 from __future__ import annotations
@@ -54,6 +62,10 @@ from urllib.parse import urlparse
 LOGIN_TYPE = 1
 CONFIRM_WORD = "DEDUPE"
 FIXURLS_WORD = "FIXURLS"
+MERGE_WORD = "MERGE"
+RENAME_WORD = "RENAME"
+ID_PREFIX = 8  # the shortest start of an item id taken as an id, and the length a candidate's id is shown at
+MAX_LISTED = 20  # candidates listed for a search that finds several
 SUFFIX_LIST = Path(__file__).with_name("public_suffix_list.dat")
 SUFFIX_LIST_MIN_RULES = 5000  # the real list has about 10,000; far fewer means a cut-off or wrong file
 WEB_SCHEMES = ("http", "https")
@@ -303,6 +315,11 @@ def passkey_ids(item: dict) -> list[tuple[str, str]]:
                   for c in passkeys(item))
 
 
+def key_missing(item: dict) -> bool:
+    """A passkey bw listed without its key: an edit would save the gap, and a read-back of a gap proves nothing."""
+    return any(not c.get("keyValue") or not c.get("credentialId") or not c.get("rpId") for c in passkeys(item))
+
+
 def blocker(items: list[dict], keeper: dict, masked: list[dict]) -> str | None:
     """Why this group must be left alone, or None when it is safe to act on."""
     if any(i.get("organizationId") for i in items):
@@ -311,8 +328,8 @@ def blocker(items: list[dict], keeper: dict, masked: list[dict]) -> str | None:
         return "has an attachment"
     if sum(1 for i in items if passkeys(i)) > 1:
         return "several copies hold a passkey"
-    if any(not c.get("keyValue") or not c.get("credentialId") or not c.get("rpId") for i in items for c in passkeys(i)):
-        return "a passkey that bw listed without its key"  # an edit would save the gap, and a read-back of a gap proves nothing
+    if any(key_missing(i) for i in items):
+        return "a passkey that bw listed without its key"
     if len({login_of(i).get("totp") for i in items if login_of(i).get("totp")}) > 1:
         return "different one-time-code seeds"
     seen: dict[tuple, str] = {}
@@ -482,6 +499,11 @@ def item_dates(item: dict) -> list[tuple[str, datetime | None]]:
             ("edited", when(item.get("revisionDate"))), ("created", when(item.get("creationDate")))]
 
 
+def shown_dates(item: dict) -> str:
+    """Every date bw reports for a copy, in local time."""
+    return ", ".join(f"{label} {d.astimezone():%Y-%m-%d %H:%M}" for label, d in item_dates(item) if d)
+
+
 def by_newest_password(g: Group) -> list[dict]:
     """The group's copies, newest password first. A password is as old as its last change, or as its copy when
     bw has never seen it change (an import or an untouched entry); the last edit breaks ties."""
@@ -620,7 +642,7 @@ def render_choices(g: Group, copies: list[dict], n: int, total: int, folders: di
     if may_be_separate(g):
         lines.append("  These may be separate accounts. If they are, press Enter to keep both.")
     for k, item in enumerate(copies, start=1):
-        dates = ", ".join(f"{label} {d.astimezone():%Y-%m-%d %H:%M}" for label, d in item_dates(item) if d)
+        dates = shown_dates(item)
         mark = "" if item is not g.keeper else "  (kept entry, holds a passkey)" if passkeys(item) else "  (kept entry)"
         masked = "  (masked username)" if is_masked_copy(item, g.account) else ""
         lines.append(f'  {k}  "{clean(item.get("name") or "(no name)")}"  {addresses(item)}  folder: {folder_name(item, folders)}  '
@@ -765,7 +787,8 @@ def apply(groups: list[Group], fixurls: bool = False) -> None:
             verify_edit(g, exact_uris=fixurls)
         for other in g.others:
             run_bw("delete", "item", other["id"])
-        done = "added the https:// address" if fixurls else f"kept one, trashed {len(g.others)}"
+        # a rename is the one edit with no other copies, outside fixurls
+        done = "added the https:// address" if fixurls else f"kept one, trashed {len(g.others)}" if g.others else "renamed"
         print(f"[{n}/{len(groups)}] {g.label}: {done}", flush=True)
 
 
@@ -799,15 +822,180 @@ def run_fixurls(args: argparse.Namespace, items: list[dict], folders: dict[str, 
     print("Done. Run the check-up again to see what is left.")
 
 
+def found_by(item: dict, term: str) -> bool:
+    """The term is in the entry's name, username or one of its addresses, any capitals."""
+    t = term.lower()
+    return any(t in text.lower() for text in [item.get("name") or "", login_of(item).get("username") or "", *uri_strings(item)])
+
+
+def candidate_line(item: dict, width: int) -> str:
+    """One entry a search found: the start of its id, name, username and addresses. Never a password."""
+    return clean(f'  {str(item["id"])[:width]}  "{item.get("name") or "(no name)"}"  '
+                 f'{login_of(item).get("username") or "(no username)"}  {addresses(item)}')
+
+
+def pick_entries(items: list[dict], terms: list[str]) -> list[dict]:
+    """The one live login each term names: the login with that id, else the logins whose id starts with it (8 characters
+    or more) or that it finds by name, username or address. Stops the run, listing what each term found, unless every
+    term finds exactly one."""
+    logins = [i for i in items if i.get("type") == LOGIN_TYPE and not i.get("deletedDate")]
+    found, missing, several = [], [], []
+    for term in terms:
+        hits = [i for i in logins if str(i["id"]).lower() == term.lower()] or [
+            i for i in logins if (len(term) >= ID_PREFIX and str(i["id"]).lower().startswith(term.lower())) or found_by(i, term)]
+        if len(hits) == 1:
+            found.append(hits[0])
+        elif not hits:
+            missing.append(f'No login in your vault matches "{clean(term)}" by name, username, web address or id.')
+        else:
+            width = ID_PREFIX  # long enough to tell these candidates apart, so the id shown always finds one
+            while len({str(i["id"])[:width] for i in hits}) < len(hits) and width < max(len(str(i["id"])) for i in hits):
+                width += 1
+            lines = [f'"{clean(term)}" matches {len(hits)} logins:'] + [candidate_line(i, width) for i in hits[:MAX_LISTED]]
+            if len(hits) > MAX_LISTED:
+                lines.append(f"  ... and {len(hits) - MAX_LISTED} more. Search for something longer, or use the id.")
+            several.append("\n".join(lines))
+    if missing or several:
+        advice = ["Nothing was changed."]
+        if several:
+            advice.append("Run the line again with the id of the entry you mean: the characters at the start of its line above.")
+        if missing:
+            advice.append("Check the spelling, or use the entry's id, from the address of the entry in the Bitwarden web vault.")
+        sys.exit("\n\n".join(missing + several + [" ".join(advice)]))
+    return found
+
+
+def account_of(item: dict) -> str:
+    """The site and username a chosen entry is shown under, as a group's account is."""
+    first = first_site_uri(uri_strings(item))
+    return f"{site_of(first) if first else 'no address'}|{login_of(item).get('username') or '(no username)'}"
+
+
+def merge_refusal(keeper: dict, others: list[dict]) -> str | None:
+    """Why these chosen entries must not be merged, or None. The person chose the entry to keep, so its password may
+    differ from the others'; every other reason the duplicate cleanup leaves a group alone still refuses."""
+    def username(i: dict) -> str:
+        return (login_of(i).get("username") or "").strip().lower()
+    odd = [o for o in others if username(o) != username(keeper)]
+    if odd:
+        # A masked username can fit a different account on the same site: only dedupe pick, which says so, may join it.
+        if any(MASK in (login_of(i).get("username") or "") for i in [keeper, *odd]):
+            return (f"{MASKED_COPY}, so it may be a different account. Type the real username in that entry in Bitwarden "
+                    "first, or use dedupe pick, which shows both copies")
+        return "the usernames differ (" + ", ".join(sorted({clean(login_of(i).get("username") or "(none)") for i in [keeper, *odd]})) + ")"
+    why = blocker([keeper, *others], keeper, [])  # no masked copy: every username is the same
+    if why and why != DIFFERENT_PASSWORDS:
+        return why
+    if any(passkeys(o) for o in others):
+        return "an entry to fold in holds a passkey, which cannot be moved: run it again with that entry as the one to keep"
+    if not login_of(keeper).get("password") and len({pw for o in others if (pw := login_of(o).get("password"))}) > 1:
+        return "the entry to keep has no password and the others have different ones: run it again keeping the entry whose password works"
+    return None
+
+
+def password_lines(g: Group) -> list[str]:
+    """Each entry's password as a letter, A being the kept entry's, with its dates; nothing when the passwords agree.
+    Only ever shown after merge_refusal, so when they differ the kept entry has a password."""
+    letters: dict[str, str] = {}
+    for i in [g.keeper, *g.others]:
+        if pw := login_of(i).get("password"):
+            letters.setdefault(pw, chr(ord("A") + len(letters)))
+    if len(letters) < 2:
+        return []
+    lines = ["  PASSWORDS differ. Each is shown as a letter, never the password itself:"]
+    for i in [g.keeper, *g.others]:
+        pw = login_of(i).get("password")
+        about = ", ".join(([] if pw else ["no password"]) + ([shown_dates(i)] if shown_dates(i) else []))
+        lines.append(f'    {letters[pw] if pw else "-"}  "{clean(i.get("name") or "(no name)")}"  {about}{"  (kept)" if i is g.keeper else ""}')
+    dropped = sorted(set(letters.values()) - {"A"})
+    which = (f"Password {dropped[0]} is dropped: it goes to the Bitwarden trash with its entry, where it stays" if len(dropped) == 1 else
+             f"Passwords {', '.join(dropped)} are dropped: they go to the Bitwarden trash with their entries, where they stay")
+    lines.append(f"  The kept entry keeps password A. {which} for 30 days and can be restored. "
+                 "Sign in with password A before then to check that it works.")
+    return lines
+
+
+def run_merge(keep: str, fold: list[str]) -> None:
+    print(f"Nothing in your vault changes until you have read the plan below and typed {MERGE_WORD}.\n", flush=True)
+    items = load_items()
+    folders = load_folders()
+    keeper, *others = pick_entries(items, [keep, *fold])
+    ids = [o["id"] for o in others]
+    if keeper["id"] in ids:
+        sys.exit(f'The entry to keep, "{clean(keeper.get("name") or "(no name)")}", is also named as an entry to fold in. Nothing was changed.')
+    if len(set(ids)) < len(ids):
+        sys.exit("The same entry is named twice as an entry to fold in. Nothing was changed.")
+    if why := merge_refusal(keeper, others):
+        sys.exit(f"Not merged: {why}. Nothing was changed.")
+    merged = merge_into(keeper, others)
+    g = Group(account_of(keeper), keeper, others, merged=merged if merged != keeper else None)
+    print(render_preview([g], 1, folders))
+    print("\n".join(password_lines(g) + [""]))
+    n = len(others)
+    answer = ask(f"This will {'edit the kept entry and ' if g.merged is not None else ''}move {n} {'entry' if n == 1 else 'entries'} "
+                 f"to the Bitwarden trash, where {'it stays' if n == 1 else 'they stay'} for 30 days. Type {MERGE_WORD} to continue: ")
+    if answer != MERGE_WORD:
+        sys.exit("Not confirmed. Nothing was changed.")
+    apply([g])
+    print(f"Done. {n} {'entry is' if n == 1 else 'entries are'} in the web vault's Trash for 30 days.")
+
+
+def rename_refusal(item: dict) -> str | None:
+    """Why an entry must be renamed by hand, or None: the edit sends the whole entry back to bw."""
+    if item.get("organizationId"):
+        return "it is shared with an organization"
+    if item.get("attachments"):
+        return "it has an attachment"
+    if key_missing(item):
+        return "it holds a passkey that bw listed without its key"
+    return None
+
+
+def run_rename(entry: str, new_name: str) -> None:
+    if not new_name.strip() or "\n" in new_name or "\r" in new_name:
+        sys.exit("The new name must have something in it, on one line. Nothing was changed.")
+    print(f"Nothing in your vault changes until you have read the change below and typed {RENAME_WORD}.\n", flush=True)
+    item = pick_entries(load_items(), [entry])[0]
+    if item.get("name") == new_name:
+        print(f'Nothing to do: the entry is already named "{clean(new_name)}".')
+        return
+    if why := rename_refusal(item):
+        sys.exit(f"Not renamed: {why}. Rename it in the Bitwarden web vault. Nothing was changed.")
+    merged = copy.deepcopy(item)
+    merged["name"] = new_name
+    g = Group(account_of(item), item, [], merged=merged)
+    print(f'  ENTRY  {g.label}  {addresses(item)}\n  FROM   "{clean(item.get("name") or "(no name)")}"\n  TO     "{clean(new_name)}"')
+    if passkeys(item):
+        print("  NOTE   this entry holds a passkey. The edit is read back and the run stops if it differs, but the passkey itself "
+              "could already be changed: keep the original in Apple Passwords or Chrome until you have checked this entry in Bitwarden")
+    if ask(f"\nThis changes the entry's name and nothing else. Type {RENAME_WORD} to continue: ") != RENAME_WORD:
+        sys.exit("Not confirmed. Nothing was changed.")
+    apply([g])
+    print("Done.")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("stage", choices=["exact", "merge", "pick", "fixurls"],
-                    help="exact: identical copies only; merge: every group safe to merge; pick: choose between different passwords; "
-                         "fixurls: add https:// to logins saved with http:// only")
-    ap.add_argument("--out-dir", required=True, help="folder for the plan file")
-    ap.add_argument("--apply", action="store_true", help="act on the plan after you type the confirmation word")
-    ap.add_argument("--limit", type=int, help="act on only the first N groups (a first run should use 1)")
+    steps = ap.add_subparsers(dest="stage", required=True, metavar="step")
+    for stage, help_text in [("exact", "identical copies only"), ("merge", "every group safe to merge"),
+                             ("pick", "choose between different passwords"), ("fixurls", "add https:// to logins saved with http:// only")]:
+        p = steps.add_parser(stage, help=help_text)
+        p.add_argument("--out-dir", required=True, help="folder for the plan file")
+        p.add_argument("--apply", action="store_true", help="act on the plan after you type the confirmation word")
+        p.add_argument("--limit", type=int, help="act on only the first N groups (a first run should use 1)")
+    p = steps.add_parser("merge-entries", help=f"keep the first entry, fold the others into it and trash them, after you type {MERGE_WORD}")
+    p.add_argument("keep", help="the entry to keep: its id (8 characters or more) or a search of names, usernames and addresses")
+    p.add_argument("fold", nargs="+", help="an entry to fold in, named the same way")
+    p = steps.add_parser("rename", help=f"give one entry a new name, after you type {RENAME_WORD}")
+    p.add_argument("entry", help="the entry: its id (8 characters or more) or a search of names, usernames and addresses")
+    p.add_argument("new_name", help="its new name")
     args = ap.parse_args()
+    if args.stage == "merge-entries":
+        run_merge(args.keep, args.fold)
+        return
+    if args.stage == "rename":
+        run_rename(args.entry, args.new_name)
+        return
     if args.limit is not None and args.limit < 1:
         sys.exit("--limit must be 1 or more")
 

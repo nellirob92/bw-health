@@ -5,13 +5,16 @@
 #   curl -fsSL <BASE_URL>/bw-health.sh | bash -s -- dedupe exact|merge|pick # duplicate cleanup preview (read-only)
 #   curl -fsSL <BASE_URL>/bw-health.sh | bash -s -- dedupe merge apply [N]   # act on it, after a typed confirmation
 #   curl -fsSL <BASE_URL>/bw-health.sh | bash -s -- fixurls [apply [N]] # add https:// to http://-only logins (preview first)
+#   curl -fsSL <BASE_URL>/bw-health.sh | bash -s -- merge "<entry to keep>" "<entry to fold in>" ["<another>" ...]
+#   curl -fsSL <BASE_URL>/bw-health.sh | bash -s -- rename "<entry>" "<new name>"  # each after a typed word
 #   curl -fsSL <BASE_URL>/bw-health.sh | bash -s -- --summary-only     # only the shareable summary, no report
 #   curl -fsSL <BASE_URL>/bw-health.sh | bash -s -- logout             # sign out of Bitwarden on this Mac
 #   bash bw-health.sh exports                                          # stage Downloads exports only
 # Several people on one Mac account: add --user NAME to any line (own sign-in, folders and reports),
 # and --logout-after to sign that person out when the run ends.
 # <BASE_URL> is a release tag (see VERSION below), never main.
-# Only the dedupe and fixurls steps ever change the vault; see README.md.
+# Only the dedupe, fixurls, merge and rename steps ever change the vault; see README.md.
+# A vault already unlocked in this window (BW_SESSION, and bw status says unlocked) is used and left open.
 
 set -euo pipefail
 
@@ -52,12 +55,20 @@ case "${1:-}" in
     case "${2:-}" in ""|apply) ;; *) fail "after fixurls, the only word allowed is apply" ;; esac
     [ -z "${3:-}" ] || { [ "${2:-}" = apply ] && [[ "$3" =~ ^[1-9][0-9]*$ ]]; } || fail "a limit goes after apply and is a whole number, 1 or more"
     [ -z "${4:-}" ] || fail "nothing is allowed after the limit" ;;
-  *) fail "unknown step: $1. Leave it out for the check-up, or use check, exports, dedupe, fixurls or logout." ;;
+  merge)
+    [ "$#" -ge 3 ] || fail 'use: merge "<entry to keep>" "<entry to fold in>", and more entries to fold in after it if you like. An entry is its name, username, web address or id.'
+    for entry in "${@:2}"; do [ -n "$entry" ] || fail "an entry to merge cannot be empty"; done ;;
+  rename)
+    [ "$#" = 3 ] || fail 'use: rename "<entry>" "<new name>". Put quotes round each one that has a space in it.'
+    [ -n "$2" ] || fail "the entry to rename cannot be empty"
+    [ -n "$(printf '%s' "$3" | tr -d '[:space:]')" ] || fail "the new name must have something in it"
+    case "$3" in *$'\n'*|*$'\r'*) fail "the new name must be on one line" ;; esac ;;
+  *) fail "unknown step: $1. Leave it out for the check-up, or use check, exports, dedupe, fixurls, merge, rename or logout." ;;
 esac
 
 # A release is a tag. This script fetches its files from the tag of its own version and uses each
 # one only if it matches the checksum below, so no run depends on whatever is on main.
-VERSION="1.1.1"
+VERSION="1.2.0"
 RELEASE_URL="https://raw.githubusercontent.com/nellirob92/bw-health/v$VERSION"
 BASE_URL="${BW_HEALTH_BASE_URL:-$RELEASE_URL}"
 FILES="bw_report.py bw_import_diff.py bw_dedupe.py fix_order.txt public_suffix_list.dat"
@@ -66,7 +77,7 @@ pinned_sha256() { # <file name>
   case "$1" in
     bw_report.py)      echo "b3f32a63c793a2a79beb332864c7dfc1b54432718a92d895b48a9f4ca022f4cb" ;;
     bw_import_diff.py) echo "5c01fa14640d0de6e844cde52944cbef8d116ed91fb2ce3f064430ff17bdf37c" ;;
-    bw_dedupe.py)      echo "f9474369698b3a11042fafa7ce351abbe77d092c800e9af0255c88c0dbf2bd9f" ;;
+    bw_dedupe.py)      echo "c55c397030461f6ca0854d04123ff4fb9b822fe2e6576664382f4bd2ddc2d48d" ;;
     fix_order.txt)     echo "41a48bd1b954f15c5ad4b8503cabd974b9e036f8ab08d6ad685911b8fdd6f55b" ;;
     public_suffix_list.dat) echo "3084c6ca4ac1dfb6e32461504b5dc494cc58ace521957e9e978ed0f870b2de94" ;;
     *) fail "no checksum is written in bw-health.sh for $1" ;;
@@ -325,13 +336,14 @@ account_email() {
   printf '%s' "$email"
 }
 # Runs however the run ends: this run's script folder is removed, and once sign-in has succeeded the
-# vault is always locked and the account signed out when --logout-after asked for it.
-SIGNED_IN=0
+# vault is locked (unless it was already open in this window when the run began) and the account signed
+# out when --logout-after asked for it.
+SIGNED_IN=0; OPEN_SESSION=0
 finish() {
   local code=$?
   [ -z "$RUN_DIR" ] || rm -rf "$RUN_DIR"
   [ "$SIGNED_IN" = 1 ] || exit "$code"
-  "$BW" lock >/dev/null 2>&1 || true
+  [ "$OPEN_SESSION" = 1 ] || "$BW" lock >/dev/null 2>&1 || true
   if [ "$LOGOUT_AFTER" = 1 ]; then
     if sign_out; then
       say "${TAG}Bitwarden is signed out on this Mac."
@@ -413,9 +425,14 @@ esac
 
 # --- 2. sign in -----------------------------------------------------------------------------
 # `login --raw` and `unlock --raw` both print the session key, so each path asks for the
-# master password exactly once.
+# master password exactly once. A session key already in this window's BW_SESSION is used only when
+# bw says it unlocks this run's own sign-in folder (the profile's, or the shared one); otherwise it is
+# replaced as before.
 status="$(bw_status .status)" || fail "could not read Bitwarden's sign-in status"
-if [ "$status" = "unauthenticated" ]; then
+if [ -n "${BW_SESSION:-}" ] && [ "$status" = "unlocked" ]; then
+  OPEN_SESSION=1
+  say "Using the vault already open in this window. It is left open when the run ends."
+elif [ "$status" = "unauthenticated" ]; then
   if [ -n "$PROFILE" ]; then
     say "Profile $PROFILE: sign in to Bitwarden. Type $PROFILE's email, then the master password (nothing shows while typing), then the two-step code if asked."
   else
@@ -440,8 +457,6 @@ if [ -n "$PROFILE" ]; then
   say "Profile $PROFILE: this run uses the vault of $ACCOUNT"
 fi
 
-# --- 3. health report -----------------------------------------------------------------------
-say "Checking every password (this can take a minute)"
 export PATH="$BIN_DIR:$PATH"
 
 # --- duplicate cleanup (its own run: `bash -s -- dedupe exact|merge|pick [apply [N]]`) ------------
@@ -463,6 +478,21 @@ if [ "${1:-}" = "fixurls" ]; then
   "$UV" run --quiet "$RUN_DIR/bw_dedupe.py" "${fix_args[@]}" </dev/null || fail "AutoFill fix failed"
   exit 0
 fi
+
+# --- merge or rename chosen entries (each its own run; the entries come after --, so none is read as an option) ---
+if [ "${1:-}" = "merge" ]; then
+  say "Merge entries"
+  "$UV" run --quiet "$RUN_DIR/bw_dedupe.py" merge-entries -- "${@:2}" </dev/null || fail "the merge stopped; the lines above say why"
+  exit 0
+fi
+if [ "${1:-}" = "rename" ]; then
+  say "Rename an entry"
+  "$UV" run --quiet "$RUN_DIR/bw_dedupe.py" rename -- "$2" "$3" </dev/null || fail "the rename stopped; the lines above say why"
+  exit 0
+fi
+
+# --- 3. health report -----------------------------------------------------------------------
+say "Checking every password (this can take a minute)"
 
 # A dated report per run, in this person's own folder. The progress file beside it holds item ids
 # and the reasons they were flagged, so the next run can say what was fixed.
@@ -515,4 +545,5 @@ elif [ "$MOVED" -gt 0 ]; then
 fi
 
 [ ! -e "$HOME/Desktop/$REPORT_NAME.html" ] || say "An older report, '$REPORT_NAME.html', is still on your Desktop. Reports are no longer saved there: drag it to the Trash."
-say "Done. The report is open in your browser. It is kept in $REPORTS_DIR, not on the Desktop. Your vault is locked again."
+if [ "$OPEN_SESSION" = 1 ]; then vault_state="Your vault is still open in this window, as it was."; else vault_state="Your vault is locked again."; fi
+say "Done. The report is open in your browser. It is kept in $REPORTS_DIR, not on the Desktop. $vault_state"

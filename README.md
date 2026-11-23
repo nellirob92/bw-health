@@ -2,7 +2,8 @@
 
 A one-line password check-up for a Bitwarden vault, for family members on a Mac. It finds passwords that
 are exposed in a breach, reused, weak or saved twice and shows them on one page, with a summary you can share.
-It helps you move old Chrome and Apple passwords in, and can tidy duplicate entries and AutoFill addresses.
+It helps you move old Chrome and Apple passwords in, can tidy duplicate entries and AutoFill addresses, and can
+merge or rename entries you choose.
 It works on the free Bitwarden plan.
 
 - [Run the check-up](#run-the-check-up)
@@ -11,6 +12,7 @@ It works on the free Bitwarden plan.
 - [Share a summary](#share-a-summary)
 - [Clean up duplicates](#clean-up-duplicates)
 - [Fix AutoFill addresses](#fix-autofill-addresses)
+- [Merge or rename entries](#merge-or-rename-entries)
 - [If something goes wrong](#if-something-goes-wrong)
 - [Privacy and safety](#privacy-and-safety)
 - [For maintainers](#for-maintainers)
@@ -20,7 +22,7 @@ It works on the free Bitwarden plan.
 Open Terminal (press Command-Space, type `Terminal`, press Return), paste this line, press Return:
 
 ```
-curl -fsSL https://raw.githubusercontent.com/nellirob92/bw-health/v1.1.1/bw-health.sh | bash
+curl -fsSL https://raw.githubusercontent.com/nellirob92/bw-health/v1.2.0/bw-health.sh | bash
 ```
 
 It asks for your Bitwarden email (the first time only), your master password, and the two-step code if
@@ -49,7 +51,8 @@ mode, fits a phone and prints.
   Bitwarden.
 
 **This check only reads your vault.** It never merges, deletes or changes anything, and no password is
-ever shown. It locks your vault again when it finishes.
+ever shown. It locks your vault again when it finishes, unless the vault was already unlocked in that Terminal
+window: then it says so, uses it, and leaves it open.
 
 | The report lists | Meaning |
 | --- | --- |
@@ -97,7 +100,7 @@ To check several people's vaults from one Mac account, one after another, give e
 `--user`. Add the words after `bash -s --` on the paste line:
 
 ```
-curl -fsSL https://raw.githubusercontent.com/nellirob92/bw-health/v1.1.1/bw-health.sh | bash -s -- --user mom
+curl -fsSL https://raw.githubusercontent.com/nellirob92/bw-health/v1.2.0/bw-health.sh | bash -s -- --user mom
 ```
 
 | Add this | What happens |
@@ -130,7 +133,7 @@ summary and the report show the same check-up time, so a pair from one run can b
 To write and open only the summary, with no report and no import step:
 
 ```
-curl -fsSL https://raw.githubusercontent.com/nellirob92/bw-health/v1.1.1/bw-health.sh | bash -s -- --summary-only
+curl -fsSL https://raw.githubusercontent.com/nellirob92/bw-health/v1.2.0/bw-health.sh | bash -s -- --summary-only
 ```
 
 ## Clean up duplicates
@@ -142,7 +145,7 @@ changes your vault when you add `apply` and then type `DEDUPE` after reading the
 Add the words after `bash -s --` on the paste line, for example:
 
 ```
-curl -fsSL https://raw.githubusercontent.com/nellirob92/bw-health/v1.1.1/bw-health.sh | bash -s -- dedupe merge
+curl -fsSL https://raw.githubusercontent.com/nellirob92/bw-health/v1.2.0/bw-health.sh | bash -s -- dedupe merge
 ```
 
 | Add this | What happens |
@@ -203,6 +206,25 @@ your home network (a router or printer has no `https://` page). After each edit 
 the run stops if the `https://` address did not come back. Whether AutoFill then offers it is Bitwarden's
 and the phone's doing; this has not been checked on a real iPhone.
 
+## Merge or rename entries
+
+Two steps change the entries you name, each after you read what it will do and type its word:
+
+```
+curl -fsSL https://raw.githubusercontent.com/nellirob92/bw-health/v1.2.0/bw-health.sh | bash -s -- merge "Netflix" "Netflix (Apple)"
+```
+
+| Add this | What happens |
+| --- | --- |
+| `merge "<entry to keep>" "<entry to fold in>" ...` | The first entry is kept and gains the others' addresses, notes, custom fields and one-time code, as a dedupe merge does. The others go to the Trash for 30 days. Type `MERGE`. |
+| `rename "<entry>" "<new name>"` | Gives the entry a new name and changes nothing else. Type `RENAME`. |
+
+Name an entry by its name, username or web address, or by its id. When that fits more than one login, nothing
+changes and the run lists them with the start of each id: run the line again with the id. The kept entry's
+password always stays; if another entry's differs, the plan shows the passwords as letters, never the passwords,
+and the other one goes to the Trash with its entry. A merge is refused when the usernames differ, when one is
+masked with `*`, or for any reason the duplicate cleanup would leave the copies alone.
+
 ## If something goes wrong
 
 - **"That did not unlock your Bitwarden vault."** The master password was almost certainly typed wrong.
@@ -214,8 +236,8 @@ and the phone's doing; this has not been checked on a real iPhone.
 
 ## Privacy and safety
 
-- The check-up and the previews only read your vault. Only `dedupe ... apply` and `fixurls apply` change
-  it, each after its own typed word.
+- The check-up and the previews only read your vault. Only `dedupe ... apply`, `fixurls apply`, `merge` and
+  `rename` change it, each after its own typed word.
 - No password, and no text from a note, is printed, logged or written to any file.
 - Two things are fetched from the internet during the check-up, and neither names a site, a username or
   you: the breach check sends only a 5-character hash prefix, and the two-step check downloads the whole
@@ -244,7 +266,7 @@ and the phone's doing; this has not been checked on a real iPhone.
 | `public_suffix_list.dat` | A pinned copy of the [Public Suffix List](https://publicsuffix.org/list/), so `co.uk` and `github.io` are read as shared endings when sites are grouped. Never fetched at run time from its source: update it by hand, with a new checksum and `VERSION`. |
 | `fix_order.txt` | The one place the kinds of site are decided. One `tier domain`, `tier .ending` (such as `1 .gov`) or `tier folder: name` per line; a folder line wins, then a domain, then an ending. Edit it to add a site. |
 | `bw_import_diff.py` | Compares Chrome and Apple exports with the vault and writes the import csv and `conflicts.md`. Read-only. |
-| `bw_dedupe.py` | Duplicate cleanup and the AutoFill fix: the only code that edits or trashes vault items. It also holds the site grouping the report uses. |
+| `bw_dedupe.py` | Duplicate cleanup, the AutoFill fix, and merging or renaming chosen entries: the only code that edits or trashes vault items. It also holds the site grouping the report uses. |
 | `tests/run.sh` | End-to-end tests with a stand-in `bw`; fixtures are in `tests/fixture`. |
 | `tests/report_text.py` | Test-only: flattens a report page into lines the tests can search. |
 
