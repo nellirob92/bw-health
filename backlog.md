@@ -55,6 +55,16 @@ Work that was considered and left out, with the reason.
   table uses (fits exactly one plain username on the site) is not applied there yet.
 - **The shareable summary is replaced on every run**, never kept per date. A family member who wants the
   last one keeps their own copy.
+- **The report's "In trash" count is always 0.** It counts deleted items in `bw list items`, which leaves the
+  Trash out; `bw list items --trash` holds them.
+- **A dropped connection stops an apply midway.** Bitwarden's "error sending request" during an edit or a
+  trash ends the run with its raw error. A rerun is safe (it starts from what is left), but nothing says so
+  and nothing retries.
+- **`merge` and `rename` against the real Bitwarden command-line app.** The tests use a stand-in for the edit
+  and read-back, and for a session key from another sign-in folder reading as locked; the first real run is
+  the check.
+- **A file to import into Apple Passwords** once the vault is clean, without the passwords ever sitting in a
+  plain file longer than the import takes. Planned with the Apple cross-check.
 
 ## Audit findings, release 1.0.0
 
